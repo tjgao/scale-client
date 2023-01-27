@@ -65,8 +65,6 @@ type RunningState struct {
     Cert webrtc.Certificate   // local cert
     LocalUser string       // ice user
     LocalPwd string        // ice pwd
-    RemoteHash string            // algorithm
-    RemoteFingerprint string     // fingerprint
     SubResp SubscribeResp  // subscribe response
 }
 
@@ -314,7 +312,7 @@ func receive_rtp_streaming(st *RunningState, info* AnswerSDPInfo) {
     })
 
     err = dtls_transport.Start(webrtc.DTLSParameters{Role:webrtc.DTLSRoleClient, 
-    Fingerprints:[]webrtc.DTLSFingerprint{{Algorithm:st.RemoteHash, Value:st.RemoteFingerprint}}})
+    Fingerprints:[]webrtc.DTLSFingerprint{{Algorithm:info.Dtls.Hash, Value:info.Dtls.Fingerprint}}})
     if err != nil {
         panic(err)
     }
@@ -514,7 +512,7 @@ func connect(access_url string) *SubscribeResp {
         panic(err)
     }
 
-    var state = RunningState{false, *cert, genRandomHash(16), genRandomHash(48), "sha-256", fingerprint[0].Value, *sub}
+    var state = RunningState{false, *cert, genRandomHash(16), genRandomHash(48), *sub}
 
     req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
     

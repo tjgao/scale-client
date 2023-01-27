@@ -172,7 +172,9 @@ func readAnswerSDP(answer string) *AnswerSDPInfo {
             } else if a.Key == "fingerprint" {
                 sp := strings.Split(a.Value, " ")
                 info.Dtls.Hash = sp[0]
-                info.Dtls.Fingerprint = sp[1]
+                // accoridng to some comment in pion code, it should be lowercased
+                // dtlsfingerprint.go
+                info.Dtls.Fingerprint = strings.ToLower(sp[1])
             } else if a.Key == "setup" {
                 info.Dtls.Setup = a.Value
             } else if a.IsICECandidate() {
