@@ -3,27 +3,27 @@ package main
 import (
     "flag"
     log "github.com/sirupsen/logrus"
+    "math/rand"
     "os"
+    "sync"
+    "time"
 )
-
 
 func task() {
 
 }
 
 func main() {
-    logLevelTable := map[string]log.Level {
+    logLevelTable := map[string]log.Level{
         "panic": log.PanicLevel,
-		"error": log.ErrorLevel,
-		"warn":  log.WarnLevel,
-		"info":  log.InfoLevel,
-		"debug": log.DebugLevel,
+        "error": log.ErrorLevel,
+        "warn":  log.WarnLevel,
+        "info":  log.InfoLevel,
+        "debug": log.DebugLevel,
     }
 
-
     url := flag.String("u", "", "URL to access")
-    // num := flag.Int("n", 10, "Number of connections")
-    // prefix := flag.String("p", "client", "Prefix to help identify connections, e.g. if we use \"client\" as prefix, we may have client_1, client_2 ...") 
+    num := flag.Int("n", 1, "Number of connections")
     logLevel := flag.String("l", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
     logfile := flag.String("f", "", "Log file path")
 
@@ -38,6 +38,10 @@ func main() {
         log.Fatal("URL is not specified, exit")
     }
 
+    if *num <= 0 {
+        log.Fatal("Specify a positive number for connections!")
+    }
+
     if *logfile != "" {
         f, err := os.OpenFile(*logfile, os.O_RDWR|os.O_CREATE, 0666)
         if err != nil {
@@ -45,17 +49,17 @@ func main() {
         }
         log.SetOutput(f)
     }
-    
 
-	interrupt := make(chan os.Signal, 1)
+    // we'll need to call rand soon, let's do seed here
+    rand.Seed(time.Now().UnixNano())
 
-    go connect(*url)
+    wg := new(sync.WaitGroup)
+    wg.Add(*num)
 
-	// main goroutine is waiting here until the user chooses to exit
-	select {
-	case <-interrupt:
-		log.Info("Interrupted!")
-		break
-	}
+    for i := 0; i < *num; i++ {
+        go connect(i, wg, *url)
+    }
+
+    wg.Wait()
     log.Info("Scale client exit")
 }

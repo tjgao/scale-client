@@ -1,71 +1,84 @@
 package main
 
 import (
-	"fmt"
-	"bytes"
-	"context"
-	"crypto/sha256"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/tls"
-	rd "crypto/rand"
-	// "crypto/x509"
-	"encoding/json"
-	"io/ioutil"
-	// "net"
-	"net/http"
-	"net/url"
-	"regexp"
-	"errors"
-	"time"
-    "math/rand"
+    "bytes"
+    "context"
+    "crypto/ecdsa"
+    "crypto/elliptic"
+    rd "crypto/rand"
+    "crypto/sha256"
+    "crypto/tls"
+    "fmt"
+    "sync"
 
-	"github.com/gorilla/websocket"
-	"github.com/pion/ice/v2"
-	"github.com/pion/webrtc/v3"
-	// "github.com/pion/dtls/v2"
-	// "github.com/pion/dtls/v2/pkg/crypto/selfsign"
-	// "github.com/pion/webrtc/v2"
-	log "github.com/sirupsen/logrus"
+    // "crypto/x509"
+    "encoding/json"
+    "io/ioutil"
+
+    // "net"
+    "errors"
+    "net/http"
+    "net/url"
+    "regexp"
+
+    "github.com/gorilla/websocket"
+    "github.com/pion/ice/v2"
+    "github.com/pion/webrtc/v3"
+
+    log "github.com/sirupsen/logrus"
 )
 
 type ReqJson struct {
     StreamAccountId string `json:"streamAccountId"`
-    StreamName string `json:"streamName"`
+    StreamName      string `json:"streamName"`
 }
 
 type IceServer struct {
-    Urls []string
-    Username string
+    Urls       []string
+    Username   string
     Credential string
 }
 
-
 type SubscribeResp struct {
-    Url string
-    Jwt string 
+    Url        string
+    Jwt        string
     IceServers []IceServer
 }
 
 type TransCommand struct {
-    Type string `json:"type"`
-    TransId int `json:"transId"`
-    Name string `json:"name"`
-    Data map[string]interface{} `json:"data"`
+    Type    string                 `json:"type"`
+    TransId int                    `json:"transId"`
+    Name    string                 `json:"name"`
+    Data    map[string]interface{} `json:"data"`
 }
 
 type TransCommandResp struct {
-    Type string `json:"type"`
-    TransId int `json:"transId"`
-    Data map[string]string `json:"data"`
+    Type    string            `json:"type"`
+    TransId int               `json:"transId"`
+    Data    map[string]string `json:"data"`
 }
 
 type RunningState struct {
-    StreamingStarted bool  // is streaming on?
-    Cert webrtc.Certificate   // local cert
-    LocalUser string       // ice user
-    LocalPwd string        // ice pwd
-    SubResp SubscribeResp  // subscribe response
+    cid       int                // an integer to identifiy a connection
+    Cert      webrtc.Certificate // local cert
+    LocalUser string             // ice user
+    LocalPwd  string             // ice pwd
+    SubResp   SubscribeResp      // subscribe response
+}
+
+func lerror(args ...interface{}) {
+    left := args[1:]
+    log.Error("(", args[0], ") ", left)
+}
+
+func linfo(args ...interface{}) {
+    left := args[1:]
+    log.Info("(", args[0], ") ", left)
+}
+
+func ldebug(args ...interface{}) {
+    left := args[1:]
+    log.Debug("(", args[0], ") ", left)
 }
 
 const subscribe_url string = "https://director.millicast.com/api/director/subscribe"
@@ -82,9 +95,8 @@ func parse(url string) map[string]string {
     return md
 }
 
-
 func addIceServer(o interface{}, sub *SubscribeResp) {
-    var ice IceServer 
+    var ice IceServer
     m := o.(map[string]interface{})
     if u, ok := m["urls"]; ok {
         _u := u.([]interface{})
@@ -94,7 +106,7 @@ func addIceServer(o interface{}, sub *SubscribeResp) {
     } else {
         log.Error("Empty ice server json object")
         return
-    } 
+    }
 
     if n, ok := m["username"]; ok {
         ice.Username = n.(string)
@@ -106,7 +118,6 @@ func addIceServer(o interface{}, sub *SubscribeResp) {
 
     sub.IceServers = append(sub.IceServers, ice)
 }
-
 
 func check_result(result map[string]interface{}) *SubscribeResp {
     var sub SubscribeResp
@@ -133,7 +144,7 @@ func check_result(result map[string]interface{}) *SubscribeResp {
         if m, ok := data["iceServers"]; ok {
             mm := m.([]interface{})
             for _, i := range mm {
-                addIceServer(i, &sub)         
+                addIceServer(i, &sub)
             }
         } else {
             log.Debug("Found no ice servers in json")
@@ -143,57 +154,55 @@ func check_result(result map[string]interface{}) *SubscribeResp {
     return &sub
 }
 
-
 func convertTypeFromICE(t ice.CandidateType) (webrtc.ICECandidateType, error) {
-	switch t {
-	case ice.CandidateTypeHost:
-		return webrtc.ICECandidateTypeHost, nil
-	case ice.CandidateTypeServerReflexive:
-		return webrtc.ICECandidateTypeSrflx, nil
-	case ice.CandidateTypePeerReflexive:
-		return webrtc.ICECandidateTypePrflx, nil
-	case ice.CandidateTypeRelay:
-		return webrtc.ICECandidateTypeRelay, nil
-	default:
-		return webrtc.ICECandidateType(t), errors.New("Unknown ICE candidate type")
-	}
+    switch t {
+    case ice.CandidateTypeHost:
+        return webrtc.ICECandidateTypeHost, nil
+    case ice.CandidateTypeServerReflexive:
+        return webrtc.ICECandidateTypeSrflx, nil
+    case ice.CandidateTypePeerReflexive:
+        return webrtc.ICECandidateTypePrflx, nil
+    case ice.CandidateTypeRelay:
+        return webrtc.ICECandidateTypeRelay, nil
+    default:
+        return webrtc.ICECandidateType(t), errors.New("Unknown ICE candidate type")
+    }
 }
 
 func newICECandidateFromICE(i ice.Candidate) (webrtc.ICECandidate, error) {
-	typ, err := convertTypeFromICE(i.Type())
-	if err != nil {
-		return webrtc.ICECandidate{}, err
-	}
-	protocol, err := webrtc.NewICEProtocol(i.NetworkType().NetworkShort())
-	if err != nil {
-		return webrtc.ICECandidate{}, err
-	}
+    typ, err := convertTypeFromICE(i.Type())
+    if err != nil {
+        return webrtc.ICECandidate{}, err
+    }
+    protocol, err := webrtc.NewICEProtocol(i.NetworkType().NetworkShort())
+    if err != nil {
+        return webrtc.ICECandidate{}, err
+    }
 
-	c := webrtc.ICECandidate{
-		Foundation: i.Foundation(),
-		Priority:   i.Priority(),
-		Address:    i.Address(),
-		Protocol:   protocol,
-		Port:       uint16(i.Port()),
-		Component:  i.Component(),
-		Typ:        typ,
-		TCPType:    i.TCPType().String(),
-	}
+    c := webrtc.ICECandidate{
+        Foundation: i.Foundation(),
+        Priority:   i.Priority(),
+        Address:    i.Address(),
+        Protocol:   protocol,
+        Port:       uint16(i.Port()),
+        Component:  i.Component(),
+        Typ:        typ,
+        TCPType:    i.TCPType().String(),
+    }
 
-	if i.RelatedAddress() != nil {
-		c.RelatedAddress = i.RelatedAddress().Address
-		c.RelatedPort = uint16(i.RelatedAddress().Port)
-	}
+    if i.RelatedAddress() != nil {
+        c.RelatedAddress = i.RelatedAddress().Address
+        c.RelatedPort = uint16(i.RelatedAddress().Port)
+    }
 
-	return c, nil
+    return c, nil
 }
 
-
-func create_ice_connection(st *RunningState,  info *AnswerSDPInfo) *ice.Conn {
+func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
     iceAgent, err := ice.NewAgent(&ice.AgentConfig{
         NetworkTypes: []ice.NetworkType{ice.NetworkTypeUDP4},
-        LocalUfrag: st.LocalUser,
-        LocalPwd: st.LocalPwd,
+        LocalUfrag:   st.LocalUser,
+        LocalPwd:     st.LocalPwd,
     })
     if err != nil {
         panic(err)
@@ -211,16 +220,15 @@ func create_ice_connection(st *RunningState,  info *AnswerSDPInfo) *ice.Conn {
         iceAgent.AddRemoteCandidate(c)
     }
 
-
-    if err = iceAgent.OnCandidate(func(c ice.Candidate){}); err != nil {
-        panic(err)    
+    if err = iceAgent.OnCandidate(func(c ice.Candidate) {}); err != nil {
+        panic(err)
     }
 
     if err = iceAgent.GatherCandidates(); err != nil {
         panic(err)
     }
 
-    iceAgent.OnConnectionStateChange(func(state ice.ConnectionState){
+    iceAgent.OnConnectionStateChange(func(state ice.ConnectionState) {
         log.Debug("ice state changed to ", state)
     })
     conn, err := iceAgent.Dial(context.TODO(), info.Ice.Ufrag, info.Ice.Pwd)
@@ -231,18 +239,18 @@ func create_ice_connection(st *RunningState,  info *AnswerSDPInfo) *ice.Conn {
     return conn
 }
 
-func receive_rtp_streaming(st *RunningState, info* AnswerSDPInfo) {
+func receive_rtp_streaming(st *RunningState, info *AnswerSDPInfo) {
     // prepare ICE gathering options
-    iceOptions := webrtc.ICEGatherOptions {}
+    iceOptions := webrtc.ICEGatherOptions{}
     for _, is := range st.SubResp.IceServers {
-        iceOptions.ICEServers = append(iceOptions.ICEServers, 
-        webrtc.ICEServer {URLs:is.Urls, Username:is.Username, Credential:is.Credential})
+        iceOptions.ICEServers = append(iceOptions.ICEServers,
+            webrtc.ICEServer{URLs: is.Urls, Username: is.Username, Credential: is.Credential})
     }
 
-    s := webrtc.SettingEngine{} 
+    s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
     s.SetAnsweringDTLSRole(webrtc.DTLSRoleClient)
-        
+
     api := webrtc.NewAPI(webrtc.WithSettingEngine(s))
 
     gatherer, err := api.NewICEGatherer(iceOptions)
@@ -250,11 +258,10 @@ func receive_rtp_streaming(st *RunningState, info* AnswerSDPInfo) {
         panic(err)
     }
 
-    
     ice_transport := api.NewICETransport(gatherer)
 
     // Create DTLS transport, use our cert
-    dtls_transport, err := api.NewDTLSTransport(ice_transport, []webrtc.Certificate{st.Cert}) 
+    dtls_transport, err := api.NewDTLSTransport(ice_transport, []webrtc.Certificate{st.Cert})
     if err != nil {
         panic(err)
     }
@@ -264,26 +271,25 @@ func receive_rtp_streaming(st *RunningState, info* AnswerSDPInfo) {
         panic(err)
     }
 
-	gatherFinished := make(chan struct{})
-	gatherer.OnLocalCandidate(func(i *webrtc.ICECandidate) {
-		if i == nil {
-			close(gatherFinished)
-		} else {
-            log.Debug("add one candidate: ", i.String())
+    gatherFinished := make(chan struct{})
+    gatherer.OnLocalCandidate(func(i *webrtc.ICECandidate) {
+        if i == nil {
+            close(gatherFinished)
+        } else {
+            // ldebug(st.cid, "add one candidate: ", i.String())
         }
-	})
+    })
 
-	// Gather candidates
-	err = gatherer.Gather()
-	if err != nil {
-		panic(err)
-	}
+    // Gather candidates
+    err = gatherer.Gather()
+    if err != nil {
+        panic(err)
+    }
 
-	<-gatherFinished
+    <-gatherFinished
 
     // Add remote candidates into ice transport
     for _, i := range info.Candidates {
-        log.Debug(i)
         c, err := ice.UnmarshalCandidate(i)
         if err != nil {
             panic(err)
@@ -295,51 +301,48 @@ func receive_rtp_streaming(st *RunningState, info* AnswerSDPInfo) {
         ice_transport.AddRemoteCandidate(&cc)
     }
 
-    ice_transport.OnConnectionStateChange(func(state webrtc.ICETransportState){
-        log.Debug("ICE state changed to ", state)
+    ice_transport.OnConnectionStateChange(func(state webrtc.ICETransportState) {
+        ldebug(st.cid, "ICE state changed to ", state)
     })
     ice_transport.OnSelectedCandidatePairChange(func(p *webrtc.ICECandidatePair) {
-        log.Debug("ICE candidate pair changed ", p)
+        ldebug(st.cid, "ICE candidate pair changed ", p)
     })
+
     iceRole := webrtc.ICERoleControlling
-    err = ice_transport.Start(gatherer, webrtc.ICEParameters{UsernameFragment:info.Ice.Ufrag, Password:info.Ice.Pwd, ICELite:info.Ice.Lite}, &iceRole)
+    err = ice_transport.Start(gatherer, webrtc.ICEParameters{UsernameFragment: info.Ice.Ufrag, Password: info.Ice.Pwd, ICELite: info.Ice.Lite}, &iceRole)
     if err != nil {
         panic(err)
     }
 
-    dtls_transport.OnStateChange(func(state webrtc.DTLSTransportState){
-        log.Debug("DTLS state changed to ", state)
+    dtls_transport.OnStateChange(func(state webrtc.DTLSTransportState) {
+        ldebug(st.cid, "DTLS state changed to ", state)
     })
 
-    err = dtls_transport.Start(webrtc.DTLSParameters{Role:webrtc.DTLSRoleClient, 
-    Fingerprints:[]webrtc.DTLSFingerprint{{Algorithm:info.Dtls.Hash, Value:info.Dtls.Fingerprint}}})
+    err = dtls_transport.Start(webrtc.DTLSParameters{Role: webrtc.DTLSRoleServer,
+        Fingerprints: []webrtc.DTLSFingerprint{{Algorithm: info.Dtls.Hash, Value: info.Dtls.Fingerprint}}})
     if err != nil {
         panic(err)
     }
+
     err = rtp_receiver.Receive(info.RTPRecvParams)
     if err != nil {
         panic(err)
     }
 
-    remote_tracks := rtp_receiver.Tracks()
-    for t := range remote_tracks {
-        fmt.Printf("t: %v\n", t)
-    }
+    ldebug(st.cid, "Connection is working")
 }
 
-
-func receive_streaming(st *RunningState,  info *AnswerSDPInfo) {
+func receive_streaming(st *RunningState, info *AnswerSDPInfo) {
     receive_rtp_streaming(st, info)
     // c := create_ice_connection(st, info)
     // if c != nil {
     //     log.Debug("ICE connection is created!")
     // }
-    
-    
+
     // port, err := strconv.Atoi(info.remotePort)
     // if err != nil {
     //     log.Error("Found no valid port in Answer SDP")
-    //     return 
+    //     return
     // }
     // addr := &net.UDPAddr{IP: net.ParseIP(info.remoteIp), Port: port}
     // config := &dtls.Config {
@@ -368,41 +371,47 @@ func receive_streaming(st *RunningState,  info *AnswerSDPInfo) {
     // st.StreamingStarted = false
 }
 
-
-
 func on_event(st *RunningState, ev map[string]interface{}, buf []byte) bool {
+    var info *AnswerSDPInfo = nil
     if e, ok := ev["type"]; !ok {
-        log.Error("Unrecognized json: ", string(buf))
+        lerror(st.cid, "Unrecognized json: ", string(buf))
     } else {
         if e == "response" {
             if data, ok := ev["data"]; !ok {
-                log.Error("Found no data in the response json: ", string(buf))
+                lerror(st.cid, "Found no data in the response json: ", string(buf))
                 return false
             } else {
-                if st.StreamingStarted {
-                    log.Error("Streaming is still on, cannot start another stream")
-                    return false
-                }
-                m := data.(map[string]interface{})
-                sdp := m["sdp"].(string)
-                info := readAnswerSDP(sdp)
                 if info == nil {
-                    log.Error("Failed to extract all info from sdp")
-                    return false
+                    m := data.(map[string]interface{})
+                    sdp := m["sdp"].(string)
+                    info = readAnswerSDP(sdp)
+                    if info == nil {
+                        lerror(st.cid, "Failed to extract all info from sdp")
+                        return false
+                    }
                 }
                 go receive_streaming(st, info)
-            }           
+            }
         } else {
             if n, ok := ev["name"]; !ok {
-                log.Error("No name for this event: ", string(buf))
+                lerror(st.cid, "No name for this event: ", string(buf))
             } else {
                 if n == "stopped" {
-                    log.Info("Server stopped streaming")                
+                    linfo(st.cid, "Server stopped streaming")
                     return false
+                } else if n == "inactive" {
+                    // This means the server temporarily pauses streaming
+                    // but as long as the DTLS connection is still alive, we do not need to do anything
+                    // because when server starts streaming again,  DTLS conn will just work
+                    linfo(st.cid, "Server is inactive")
+                } else if n == "active" {
+                    /// This means the server continues streaming
+                    linfo(st.cid, "Server is active")
+                } else {
+                    ldebug(st.cid, "Received ws message: ", string(buf))
                 }
-                log.Debug("Received ws message: ", string(buf))
             }
-        }    
+        }
     }
     return true
 }
@@ -416,129 +425,112 @@ func get_fingerprint(cert tls.Certificate) string {
         } else {
             buf.WriteString(fmt.Sprintf(":%02X", b))
         }
-    } 
+    }
     return buf.String()
 }
 
-
-func connect(access_url string) *SubscribeResp {
+func connect(cid int, wg *sync.WaitGroup, access_url string) {
+    defer wg.Done()
     m := parse(access_url)
     if _, ok := m["streamAccountId"]; !ok {
-        log.Error("Failed to extract streamAccountId from URL: ", access_url)
-        return nil
-    } 
+        log.Fatal("Failed to extract streamAccountId from URL: ", access_url)
+    }
     if _, ok := m["streamName"]; !ok {
-        log.Error("Failed to extract streamName from URL: ", access_url)
-        return nil
+        log.Fatal("Failed to extract streamName from URL: ", access_url)
     }
 
-    client := &http.Client{}    
+    client := &http.Client{}
     resp, err := client.Get(access_url)
     if err != nil {
-        log.Error("Failed to access url: ", err)
-        return nil
-    } 
+        log.Fatal("Failed to access url: ", err)
+    }
 
     resp.Body.Close()
 
     streamName := m["streamName"]
     // we now send json request to the subscribe url
-    var reqJson = ReqJson{StreamAccountId:m["streamAccountId"], StreamName:m["streamName"]}
+    var reqJson = ReqJson{StreamAccountId: m["streamAccountId"], StreamName: m["streamName"]}
     bs, err := json.Marshal(&reqJson)
     if err != nil {
-        log.Error("Failed to marshal json data: ", err)
-        return nil
+        log.Fatal("Failed to marshal json data: ", err)
     }
 
     req, err := http.NewRequest("POST", subscribe_url, bytes.NewBuffer(bs))
     req.Header.Set("Content-Type", "application/json")
     resp, err = client.Do(req)
     if err != nil {
-        log.Error("Failed to post request json to url: ", subscribe_url, ",  err: ", err)
-        return nil
+        log.Fatal("Failed to post request json to url: ", subscribe_url, ",  err: ", err)
     }
 
     body, err := ioutil.ReadAll(resp.Body)
     if err != nil {
-        log.Error("Failed to read data from response, err: ", err)
-        return nil
+        log.Fatal("Failed to read data from response, err: ", err)
     }
-    log.Debug("Get response: ", string(body))
-    
-    var result map[string]interface{} 
+
+    var result map[string]interface{}
     err = json.Unmarshal(body, &result)
     if err != nil {
-        log.Error("Failed to unmarshal returned response json: ", body)
-        return nil
+        log.Fatal("Failed to unmarshal returned response json: ", body)
     }
-    
+
     sub := check_result(result)
     if sub == nil {
-        return nil
+        log.Fatal("Server's response is not valid")
     }
 
     wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
     if err != nil {
-        log.Error("The wss url seems to be invalid: ", err)
-        return nil
+        log.Fatal("The wss url seems to be invalid: ", err)
     }
-
-    // we'll need to call rand soon, let's do seed here
-    rand.Seed(time.Now().UnixNano())
 
     // we now visit wss url
     conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
     if err != nil {
-        log.Info("Failed to connect websocket url: ", wss_url.String())
-        return nil
+        log.Fatal("Failed to connect websocket url: ", wss_url.String())
     }
     defer conn.Close()
 
     // Generate a random privateKey
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rd.Reader)
-	if err != nil {
-        panic(err)
-	}
+    priv, err := ecdsa.GenerateKey(elliptic.P256(), rd.Reader)
+    if err != nil {
+        log.Fatal("Failed to generate private key for DTLS: ", err)
+    }
     // Generate cert for DTLS
     cert, err := webrtc.GenerateCertificate(priv)
 
     if err != nil {
-        log.Error("Failed to generate cert for DTLS: ", err)
-        return nil
+        log.Fatal("Failed to generate cert for DTLS: ", err)
     }
 
     fingerprint, err := cert.GetFingerprints()
     if err != nil {
-        panic(err)
+        log.Fatal("Failed to calculate fingerprint from cert: ", err)
     }
 
-    var state = RunningState{false, *cert, genRandomHash(16), genRandomHash(48), *sub}
+    var state = RunningState{cid, *cert, genRandomHash(16), genRandomHash(48), *sub}
 
     req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
-    
-    // prepare json 
-    _events := []string {"active","inactive","layers","viewercount"}
-    var sdp_mp = map[string]interface{} {"sdp":req_sdp, "streamId":streamName, "events":_events}
-    var cmd = TransCommand{Type:"cmd", TransId:0, Name:"view", Data:sdp_mp}
+
+    // prepare json
+    _events := []string{"active", "inactive", "layers", "viewercount"}
+    var sdp_mp = map[string]interface{}{"sdp": req_sdp, "streamId": streamName, "events": _events}
+    var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
     bs, err = json.Marshal(&cmd)
     if err != nil {
-        log.Error("Failed to marshal json data: ", err)
-        return nil
+        log.Fatal("Failed to marshal json data: ", err)
     }
 
     // Send view command
     err = conn.WriteMessage(websocket.TextMessage, bs)
     if err != nil {
-        log.Error("Failed to send sdp via websocket connection: ", err)
-        return nil
+        log.Fatal("Failed to send sdp via websocket connection: ", err)
     }
-
 
     // Now wait for response and other events
     for {
         t, buf, err := conn.ReadMessage()
         if err != nil {
-            log.Error("Failed to read message from websocket: ", err)
+            lerror(cid, "Failed to read message from websocket: ", err)
             break
         }
         if t == websocket.TextMessage {
@@ -546,16 +538,16 @@ func connect(access_url string) *SubscribeResp {
             var result map[string]interface{}
             err = json.Unmarshal(buf, &result)
             if err != nil {
-                log.Error("Failed to unmarshal received json: ", string(buf))
-                break
+                lerror(cid, "Failed to unmarshal received json: ", string(buf))
             } else {
-                on_event(&state, result, buf)
+                if !on_event(&state, result, buf) {
+                    linfo(cid, "Connection task exit")
+                    break
+                }
             }
         } else {
             // we recieved binary
-            log.Info("Received binary data message")
+            ldebug(cid, "Received binary data message")
         }
     }
-
-    return nil
 }
