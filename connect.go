@@ -85,7 +85,7 @@ const subscribe_url string = "https://director.millicast.com/api/director/subscr
 
 // parse the url to get stream account id and name
 func parse(url string) map[string]string {
-    re := regexp.MustCompile("http.+streamId=(?P<streamAccountId>[0-9a-z]+)/(?P<streamName>[0-9a-z]+)")
+    re := regexp.MustCompile("http.+streamId=(?P<streamAccountId>[0-9a-zA-Z]+)/(?P<streamName>[0-9a-zA-Z]+)")
     r := re.FindAllStringSubmatch(url, -1)[0]
     keys := re.SubexpNames()
     md := map[string]string{}
