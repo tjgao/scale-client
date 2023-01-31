@@ -9,8 +9,17 @@ import (
     "time"
 )
 
-func task() {
-
+type AppCfg struct {
+    // the url for viewers
+    viewer_url *string
+    // when the server turns inactive, the scale client can choose to wait the server side
+    // to go back active, or simply quit the connection
+    wait_on_inactive bool
+    // the number of coroutines that are in connecting stage
+    // if it is zero, no limit
+    max_concurrent_connecting uint64
+    // connecting rate limit data
+    rate_limit_connecting *chan struct{}
 }
 
 func main() {
@@ -22,10 +31,13 @@ func main() {
         "debug": log.DebugLevel,
     }
 
-    url := flag.String("u", "", "URL to access")
+    var cfg AppCfg
     num := flag.Int("n", 1, "Number of connections")
     logLevel := flag.String("l", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
-    logfile := flag.String("f", "", "Log file path")
+    logfile := flag.String("f", "", "Log file path, log output goes to log file instead of console")
+    cfg.wait_on_inactive = *flag.Bool("e", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit")
+    cfg.max_concurrent_connecting = *flag.Uint64("r", 0, "Specify the maximum number of connecting attempts, no limit if set to 0")
+    cfg.viewer_url = flag.String("u", "", "URL to access")
 
     flag.Parse()
     if level, ok := logLevelTable[*logLevel]; ok {
@@ -34,7 +46,7 @@ func main() {
         log.Fatal("Unrecognized log level, exit")
     }
 
-    if *url == "" {
+    if *cfg.viewer_url == "" {
         log.Fatal("URL is not specified, exit")
     }
 
@@ -50,6 +62,15 @@ func main() {
         log.SetOutput(f)
     }
 
+    if cfg.max_concurrent_connecting > 0 {
+        // note: it's buffered channel, with fixed length "max_concurrent_connecting"
+        c := make(chan struct{}, cfg.max_concurrent_connecting)
+        cfg.rate_limit_connecting = &c
+        for i := 0; i < int(cfg.max_concurrent_connecting); i++ {
+            *cfg.rate_limit_connecting <- struct{}{}
+        }
+    }
+
     // we'll need to call rand soon, let's do seed here
     rand.Seed(time.Now().UnixNano())
 
@@ -57,7 +78,7 @@ func main() {
     wg.Add(*num)
 
     for i := 0; i < *num; i++ {
-        go connect(i, wg, *url)
+        go connect(wg, i, &cfg)
     }
 
     wg.Wait()

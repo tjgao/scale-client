@@ -239,7 +239,12 @@ func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
     return conn
 }
 
-func receive_rtp_streaming(st *RunningState, info *AnswerSDPInfo) {
+func receive_rtp_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
+    if cfg.rate_limit_connecting != nil {
+        defer func() {
+            *cfg.rate_limit_connecting <- struct{}{}
+        }()
+    }
     // prepare ICE gathering options
     iceOptions := webrtc.ICEGatherOptions{}
     for _, is := range st.SubResp.IceServers {
@@ -332,46 +337,15 @@ func receive_rtp_streaming(st *RunningState, info *AnswerSDPInfo) {
     ldebug(st.cid, "Connection is working")
 }
 
-func receive_streaming(st *RunningState, info *AnswerSDPInfo) {
-    receive_rtp_streaming(st, info)
-    // c := create_ice_connection(st, info)
-    // if c != nil {
-    //     log.Debug("ICE connection is created!")
-    // }
+func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
+    var ev map[string]interface{}
+    err := json.Unmarshal(buf, &ev)
+    if err != nil {
+        // even though we received some weird json, we are staying
+        lerror(st.cid, "Failed to unmarshal received json: ", string(buf))
+        return true
+    }
 
-    // port, err := strconv.Atoi(info.remotePort)
-    // if err != nil {
-    //     log.Error("Found no valid port in Answer SDP")
-    //     return
-    // }
-    // addr := &net.UDPAddr{IP: net.ParseIP(info.remoteIp), Port: port}
-    // config := &dtls.Config {
-    //     Certificates: []tls.Certificate{st.cert},
-    //     InsecureSkipVerify: true,
-    //     ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
-    // }
-    // ctx, cancel := context.WithTimeout(context.Background(), 10 * time.Second)
-    // defer cancel()
-    // dtlsConn, err := dtls.DialWithContext(ctx, "udp", addr, config)
-    // if err != nil {
-    //     log.Error("Failed to create DTLS connection: ", err)
-    //     return
-    // }
-    //
-    // st.StreamingStarted = true
-    // b := make([]byte, 10240)
-    // for {
-    //     n, err := dtlsConn.Read(b)
-    //     if err != nil {
-    //         log.Error("Failed to receive data from dtls connection: ", err)
-    //         break
-    //     }
-    //     log.Debug("Read a packet with size ", n, " from dtls connection!")
-    // }
-    // st.StreamingStarted = false
-}
-
-func on_event(st *RunningState, ev map[string]interface{}, buf []byte) bool {
     var info *AnswerSDPInfo = nil
     if e, ok := ev["type"]; !ok {
         lerror(st.cid, "Unrecognized json: ", string(buf))
@@ -390,7 +364,7 @@ func on_event(st *RunningState, ev map[string]interface{}, buf []byte) bool {
                         return false
                     }
                 }
-                go receive_streaming(st, info)
+                go receive_rtp_streaming(cfg, st, info)
             }
         } else {
             if n, ok := ev["name"]; !ok {
@@ -404,6 +378,8 @@ func on_event(st *RunningState, ev map[string]interface{}, buf []byte) bool {
                     // but as long as the DTLS connection is still alive, we do not need to do anything
                     // because when server starts streaming again,  DTLS conn will just work
                     linfo(st.cid, "Server is inactive")
+                    // if wait_on_inactive is true, we'll stay
+                    return cfg.wait_on_inactive
                 } else if n == "active" {
                     /// This means the server continues streaming
                     linfo(st.cid, "Server is active")
@@ -429,18 +405,21 @@ func get_fingerprint(cert tls.Certificate) string {
     return buf.String()
 }
 
-func connect(cid int, wg *sync.WaitGroup, access_url string) {
+func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
     defer wg.Done()
-    m := parse(access_url)
+    if cfg.rate_limit_connecting != nil {
+        <-*cfg.rate_limit_connecting
+    }
+    m := parse(*cfg.viewer_url)
     if _, ok := m["streamAccountId"]; !ok {
-        log.Fatal("Failed to extract streamAccountId from URL: ", access_url)
+        log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
     }
     if _, ok := m["streamName"]; !ok {
-        log.Fatal("Failed to extract streamName from URL: ", access_url)
+        log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
     }
 
     client := &http.Client{}
-    resp, err := client.Get(access_url)
+    resp, err := client.Get(*cfg.viewer_url)
     if err != nil {
         log.Fatal("Failed to access url: ", err)
     }
@@ -534,16 +513,9 @@ func connect(cid int, wg *sync.WaitGroup, access_url string) {
             break
         }
         if t == websocket.TextMessage {
-            // we received text message, treat it as json
-            var result map[string]interface{}
-            err = json.Unmarshal(buf, &result)
-            if err != nil {
-                lerror(cid, "Failed to unmarshal received json: ", string(buf))
-            } else {
-                if !on_event(&state, result, buf) {
-                    linfo(cid, "Connection task exit")
-                    break
-                }
+            if !on_event(cfg, &state, buf) {
+                linfo(cid, "Connection task exit")
+                break
             }
         } else {
             // we recieved binary
