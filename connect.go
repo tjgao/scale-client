@@ -383,14 +383,14 @@ func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
                     // This means the server temporarily pauses streaming
                     // but as long as the DTLS connection is still alive, we do not need to do anything
                     // because when server starts streaming again,  DTLS conn will just work
-                    linfo(st.cid, "Server is inactive")
+                    // linfo(st.cid, "Server is inactive")
                     // if wait_on_inactive is true, we'll stay
                     return cfg.wait_on_inactive
                 } else if n == "active" {
                     /// This means the server continues streaming
-                    linfo(st.cid, "Server is active")
+                    // linfo(st.cid, "Server is active")
                 } else {
-                    ldebug(st.cid, "Received ws message: ", string(buf))
+                    // ldebug(st.cid, "Received ws message: ", string(buf))
                 }
             }
         }
