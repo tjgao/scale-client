@@ -443,7 +443,6 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
     // try to get the permissio to do connecting if needed
     if cfg.rate_limit_connecting != nil {
         <-*cfg.rate_limit_connecting
-        log.Debug("I am allowed to connect")
         state.connecting.Store(true)
         // The reason we do this is , it is possible that may not have the chance
         // to call receive_rtp_streaming so we won't be able to notify the channel
