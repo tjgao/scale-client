@@ -1,6 +1,7 @@
 package main
 
 import (
+    "sync/atomic"
     "bytes"
     "context"
     "crypto/ecdsa"
@@ -59,11 +60,12 @@ type TransCommandResp struct {
 }
 
 type RunningState struct {
-    cid       int                // an integer to identifiy a connection
-    Cert      webrtc.Certificate // local cert
-    LocalUser string             // ice user
-    LocalPwd  string             // ice pwd
-    SubResp   SubscribeResp      // subscribe response
+    cid        int                // an integer to identifiy a connection
+    Cert       webrtc.Certificate // local cert
+    LocalUser  string             // ice user
+    LocalPwd   string             // ice pwd
+    SubResp    *SubscribeResp     // subscribe response
+    connecting atomic.Bool
 }
 
 func lerror(args ...interface{}) {
@@ -242,7 +244,11 @@ func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
 func receive_rtp_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     if cfg.rate_limit_connecting != nil {
         defer func() {
-            *cfg.rate_limit_connecting <- struct{}{}
+            b := st.connecting.Load()
+            if b {
+                st.connecting.Store(false)
+                *cfg.rate_limit_connecting <- struct{}{}
+            }
         }()
     }
     // prepare ICE gathering options
@@ -407,15 +413,48 @@ func get_fingerprint(cert tls.Certificate) string {
 
 func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
     defer wg.Done()
-    if cfg.rate_limit_connecting != nil {
-        <-*cfg.rate_limit_connecting
-    }
     m := parse(*cfg.viewer_url)
     if _, ok := m["streamAccountId"]; !ok {
         log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
     }
     if _, ok := m["streamName"]; !ok {
         log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
+    }
+
+    // Generate a random privateKey
+    priv, err := ecdsa.GenerateKey(elliptic.P256(), rd.Reader)
+    if err != nil {
+        log.Fatal("Failed to generate private key for DTLS: ", err)
+    }
+    // Generate cert for DTLS
+    cert, err := webrtc.GenerateCertificate(priv)
+
+    if err != nil {
+        log.Fatal("Failed to generate cert for DTLS: ", err)
+    }
+
+    fingerprint, err := cert.GetFingerprints()
+    if err != nil {
+        log.Fatal("Failed to calculate fingerprint from cert: ", err)
+    }
+
+    var state = RunningState{cid, *cert, genRandomHash(16), genRandomHash(48), nil, atomic.Bool{}}
+
+    // try to get the permissio to do connecting if needed
+    if cfg.rate_limit_connecting != nil {
+        <-*cfg.rate_limit_connecting
+        log.Debug("I am allowed to connect")
+        state.connecting.Store(true)
+        // The reason we do this is , it is possible that may not have the chance
+        // to call receive_rtp_streaming so we won't be able to notify the channel
+        // we've finished connecting
+        defer func() {
+            b := state.connecting.Load()
+            if b {
+                state.connecting.Store(false)
+                *cfg.rate_limit_connecting <- struct{}{}
+            }
+        }()
     }
 
     client := &http.Client{}
@@ -455,6 +494,8 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
     sub := check_result(result)
     if sub == nil {
         log.Fatal("Server's response is not valid")
+    } else {
+        state.SubResp = sub
     }
 
     wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
@@ -468,25 +509,6 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
         log.Fatal("Failed to connect websocket url: ", wss_url.String())
     }
     defer conn.Close()
-
-    // Generate a random privateKey
-    priv, err := ecdsa.GenerateKey(elliptic.P256(), rd.Reader)
-    if err != nil {
-        log.Fatal("Failed to generate private key for DTLS: ", err)
-    }
-    // Generate cert for DTLS
-    cert, err := webrtc.GenerateCertificate(priv)
-
-    if err != nil {
-        log.Fatal("Failed to generate cert for DTLS: ", err)
-    }
-
-    fingerprint, err := cert.GetFingerprints()
-    if err != nil {
-        log.Fatal("Failed to calculate fingerprint from cert: ", err)
-    }
-
-    var state = RunningState{cid, *cert, genRandomHash(16), genRandomHash(48), *sub}
 
     req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
 

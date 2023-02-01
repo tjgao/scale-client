@@ -238,19 +238,21 @@ func readAnswerSDP(answer string) *AnswerSDPInfo {
                 }
             }
         }
-        if len(rids) != 0 && trackID != "" && streamID != "" {
-            simulcastTrack := trackDetails{
-                mid:      midValue,
-                kind:     codecType,
-                streamID: streamID,
-                id:       trackID,
-                rids:     []string{},
-            }
-            for rid := range rids {
-                simulcastTrack.rids = append(simulcastTrack.rids, rid)
-            }
-            tracksInMediaSection = []trackDetails{simulcastTrack}
-        }
+        // so far we do not have simulcast sections in remote sdp
+        // if len(rids) != 0 && trackID != "" && streamID != "" {
+        //     simulcastTrack := trackDetails{
+        //         mid:      midValue,
+        //         kind:     codecType,
+        //         streamID: streamID,
+        //         id:       trackID,
+        //         rids:     []string{},
+        //     }
+        //     for rid := range rids {
+        //         simulcastTrack.rids = append(simulcastTrack.rids, rid)
+        //     }
+        //     tracksInMediaSection = []trackDetails{simulcastTrack}
+        // }
+
         //  for t := range tracksInMediaSection {
         //      for r := range tracksInMediaSection[t].rids {
         //          info.RTPRecvParams.Encodings = append(info.RTPRecvParams.Encodings, webrtc.RTPDecodingParameters{

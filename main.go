@@ -35,8 +35,8 @@ func main() {
     num := flag.Int("n", 1, "Number of connections")
     logLevel := flag.String("l", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
     logfile := flag.String("f", "", "Log file path, log output goes to log file instead of console")
-    cfg.wait_on_inactive = *flag.Bool("e", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit")
-    cfg.max_concurrent_connecting = *flag.Uint64("r", 0, "Specify the maximum number of connecting attempts, no limit if set to 0")
+    wait_on_inactive := flag.Bool("e", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit")
+    max_connecting := flag.Uint64("r", 0, "Specify the maximum number of connecting attempts, no limit if set to 0")
     cfg.viewer_url = flag.String("u", "", "URL to access")
 
     flag.Parse()
@@ -62,7 +62,10 @@ func main() {
         log.SetOutput(f)
     }
 
-    if cfg.max_concurrent_connecting > 0 {
+    cfg.wait_on_inactive = *wait_on_inactive
+
+    if *max_connecting > 0 {
+        cfg.max_concurrent_connecting = *max_connecting
         // note: it's buffered channel, with fixed length "max_concurrent_connecting"
         c := make(chan struct{}, cfg.max_concurrent_connecting)
         cfg.rate_limit_connecting = &c
