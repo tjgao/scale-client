@@ -1,7 +1,6 @@
 package main
 
 import (
-    "sync/atomic"
     "bytes"
     "context"
     "crypto/ecdsa"
@@ -11,19 +10,20 @@ import (
     "crypto/tls"
     "fmt"
     "sync"
+    "sync/atomic"
 
-    // "crypto/x509"
     "encoding/json"
     "io/ioutil"
 
-    // "net"
     "errors"
     "net/http"
     "net/url"
     "regexp"
+    // "time"
 
     "github.com/gorilla/websocket"
     "github.com/pion/ice/v2"
+    "github.com/pion/interceptor"
     "github.com/pion/webrtc/v3"
 
     log "github.com/sirupsen/logrus"
@@ -34,16 +34,10 @@ type ReqJson struct {
     StreamName      string `json:"streamName"`
 }
 
-type IceServer struct {
-    Urls       []string
-    Username   string
-    Credential string
-}
-
 type SubscribeResp struct {
     Url        string
     Jwt        string
-    IceServers []IceServer
+    IceServers []webrtc.ICEServer
 }
 
 type TransCommand struct {
@@ -66,6 +60,7 @@ type RunningState struct {
     LocalPwd   string             // ice pwd
     SubResp    *SubscribeResp     // subscribe response
     connecting atomic.Bool
+    local_sdp  string
 }
 
 func lerror(args ...interface{}) {
@@ -98,12 +93,12 @@ func parse(url string) map[string]string {
 }
 
 func addIceServer(o interface{}, sub *SubscribeResp) {
-    var ice IceServer
+    var ice webrtc.ICEServer
     m := o.(map[string]interface{})
     if u, ok := m["urls"]; ok {
         _u := u.([]interface{})
         for _, uu := range _u {
-            ice.Urls = append(ice.Urls, uu.(string))
+            ice.URLs = append(ice.URLs, uu.(string))
         }
     } else {
         log.Error("Empty ice server json object")
@@ -241,7 +236,106 @@ func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
     return conn
 }
 
-func receive_rtp_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
+
+// This uses PeerConnection which has better encapsulation
+// it also dynmically generates answer SDP
+// Most importantly, PeerConnection has stats implemented internally
+func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
+    if cfg.rate_limit_connecting != nil {
+        defer func() {
+            b := st.connecting.Load()
+            if b {
+                st.connecting.Store(false)
+                *cfg.rate_limit_connecting <- struct{}{}
+            }
+        }()
+    }
+
+    m := &webrtc.MediaEngine{}
+
+    videoRTCPFeedback := []webrtc.RTCPFeedback{
+        {Type: "goog-remb", Parameter: ""},
+        {Type: "ccm", Parameter: "fir"},
+        {Type: "nack", Parameter: ""},
+        {Type: "nack", Parameter: "pli"},
+    }
+
+    capability := webrtc.RTPCodecCapability{
+        MimeType: webrtc.MimeTypeH264, ClockRate: 90000, Channels: 0,
+        SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f",
+        RTCPFeedback: videoRTCPFeedback,
+    }
+
+    if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: capability, PayloadType: 102}, webrtc.RTPCodecTypeVideo); err != nil {
+        panic(err)
+    }
+
+    ic := &interceptor.Registry{}
+    if err := webrtc.RegisterDefaultInterceptors(m, ic); err != nil {
+        panic(err)
+    }
+
+    s := webrtc.SettingEngine{}
+    s.SetICECredentials(st.LocalUser, st.LocalPwd)
+    s.SetLite(info.Ice.Lite)
+    api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithSettingEngine(s), webrtc.WithInterceptorRegistry(ic))
+
+    wcfg := webrtc.Configuration{
+        Certificates: []webrtc.Certificate{st.Cert},
+    }
+
+    pc, err := api.NewPeerConnection(wcfg)
+    if err != nil {
+        log.Fatal("Failed to create peer connection: ", err)
+    }
+
+    pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+        ldebug(st.cid, "ice connection state changed to ", state)
+    })
+    pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+        ldebug(st.cid, "connection state switched to ", state)
+    })
+
+    pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+        ldebug(st.cid, "Remote track dectected: ", track.SSRC())
+    })
+
+    offer, err := pc.CreateOffer(nil)
+    if err != nil {
+        panic(err)
+    }
+
+    gather := webrtc.GatheringCompletePromise(pc)
+    if err = pc.SetLocalDescription(offer); err != nil {
+        panic(err)
+    }
+    <-gather
+
+    remote := webrtc.SessionDescription{SDP: info.orig_sdp, Type: webrtc.SDPTypeAnswer}
+    if err = pc.SetRemoteDescription(remote); err != nil {
+        panic(err)
+    }
+
+    // Here we start the goroutine for stats collecting
+    
+    // go func() {
+    //     for {
+    //         select {
+    //         case <-time.After(time.Second * 10):
+    //             report := pc.GetStats()
+    //             fmt.Printf("report: %v\n", report)
+    //             rc := pc.GetReceivers()
+    //             for _, r := range rc  {
+    //             
+    //             }
+    //         }
+    //     }
+    // }()
+}
+
+// This is a way to directly manipulate transport objects and ice gather object
+// It also takes advantage of a SDP template
+func receive_streaming_direct(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     if cfg.rate_limit_connecting != nil {
         defer func() {
             b := st.connecting.Load()
@@ -252,11 +346,7 @@ func receive_rtp_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         }()
     }
     // prepare ICE gathering options
-    iceOptions := webrtc.ICEGatherOptions{}
-    for _, is := range st.SubResp.IceServers {
-        iceOptions.ICEServers = append(iceOptions.ICEServers,
-            webrtc.ICEServer{URLs: is.Urls, Username: is.Username, Credential: is.Credential})
-    }
+    iceOptions := webrtc.ICEGatherOptions{ICEServers: st.SubResp.IceServers}
 
     s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
@@ -370,7 +460,8 @@ func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
                         return false
                     }
                 }
-                go receive_rtp_streaming(cfg, st, info)
+                // go receive_streaming_direct(cfg, st, info)
+                go receive_streaming(cfg, st, info)
             }
         } else {
             if n, ok := ev["name"]; !ok {
@@ -438,13 +529,13 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
         log.Fatal("Failed to calculate fingerprint from cert: ", err)
     }
 
-    var state = RunningState{cid, *cert, genRandomHash(16), genRandomHash(48), nil, atomic.Bool{}}
+    var state = RunningState{cid: cid, Cert: *cert, LocalUser: genRandomHash(16), LocalPwd: genRandomHash(48)}
 
     // try to get the permissio to do connecting if needed
     if cfg.rate_limit_connecting != nil {
         <-*cfg.rate_limit_connecting
         state.connecting.Store(true)
-        // The reason we do this is , it is possible that may not have the chance
+        // The reason we do this is , it is possible it may not have the chance
         // to call receive_rtp_streaming so we won't be able to notify the channel
         // we've finished connecting
         defer func() {
@@ -510,6 +601,7 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
     defer conn.Close()
 
     req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
+    state.local_sdp = req_sdp
 
     // prepare json
     _events := []string{"active", "inactive", "layers", "viewercount"}

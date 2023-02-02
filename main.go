@@ -55,7 +55,7 @@ func main() {
     }
 
     if *logfile != "" {
-        f, err := os.OpenFile(*logfile, os.O_RDWR|os.O_CREATE, 0666)
+        f, err := os.OpenFile(*logfile, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
         if err != nil {
             log.Fatal("Failed to open log file, exit")
         }
