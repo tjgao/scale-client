@@ -19,15 +19,19 @@ import (
     "net/http"
     "net/url"
     "regexp"
-    // "time"
+    "time"
 
     "github.com/gorilla/websocket"
     "github.com/pion/ice/v2"
     "github.com/pion/interceptor"
+    "github.com/pion/interceptor/pkg/stats"
+    "github.com/pion/logging"
     "github.com/pion/webrtc/v3"
 
     log "github.com/sirupsen/logrus"
 )
+
+const MAX_RTP_LEN = 2000
 
 type ReqJson struct {
     StreamAccountId string `json:"streamAccountId"`
@@ -236,11 +240,14 @@ func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
     return conn
 }
 
+func convert_stats(st *stats.Stats) []byte {
+
+    return nil
+}
 
 // This uses PeerConnection which has better encapsulation
 // it also dynmically generates answer SDP
-// Most importantly, PeerConnection has stats implemented internally
-func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
+func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo, pion_dbg bool) {
     if cfg.rate_limit_connecting != nil {
         defer func() {
             b := st.connecting.Load()
@@ -260,17 +267,44 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         {Type: "nack", Parameter: "pli"},
     }
 
-    capability := webrtc.RTPCodecCapability{
-        MimeType: webrtc.MimeTypeH264, ClockRate: 90000, Channels: 0,
-        SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f",
-        RTCPFeedback: videoRTCPFeedback,
-    }
-
-    if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: capability, PayloadType: 102}, webrtc.RTPCodecTypeVideo); err != nil {
+    err := m.RegisterCodec(
+        webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
+            MimeType: webrtc.MimeTypeH264, ClockRate: 90000, Channels: 0,
+            SDPFmtpLine:  "packetization-mode=1",
+            RTCPFeedback: videoRTCPFeedback,
+        },
+            PayloadType: 102}, webrtc.RTPCodecTypeVideo)
+    if err != nil {
         panic(err)
     }
 
+    err = m.RegisterCodec(
+        webrtc.RTPCodecParameters{
+            RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 0},
+            PayloadType:        115}, webrtc.RTPCodecTypeAudio)
+    if err != nil {
+        panic(err)
+    }
+
+    var g stats.Getter
+    o := func(i *stats.Interceptor) error {
+        f := i.RecorderFactory
+        i.RecorderFactory = func(ssrc uint32, clockRate float64) stats.Recorder {
+            ldebug(st.cid, " ssrc -> ", ssrc, " clock rate -> ", clockRate)
+            return f(ssrc, clockRate)
+        }
+        return nil
+    }
+    statsIntFactory, err := stats.NewInterceptor(o)
+    if err != nil {
+        panic(err)
+    }
+    statsIntFactory.OnNewPeerConnection(func(s string, getter stats.Getter) {
+        g = getter
+    })
+
     ic := &interceptor.Registry{}
+    ic.Add(statsIntFactory)
     if err := webrtc.RegisterDefaultInterceptors(m, ic); err != nil {
         panic(err)
     }
@@ -278,10 +312,16 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
     s.SetLite(info.Ice.Lite)
+    if pion_dbg {
+        lf := logging.NewDefaultLoggerFactory()
+        lf.DefaultLogLevel = logging.LogLevelDebug
+        s.LoggerFactory = lf
+    }
     api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithSettingEngine(s), webrtc.WithInterceptorRegistry(ic))
 
     wcfg := webrtc.Configuration{
         Certificates: []webrtc.Certificate{st.Cert},
+        SDPSemantics: webrtc.SDPSemanticsPlanB,
     }
 
     pc, err := api.NewPeerConnection(wcfg)
@@ -289,15 +329,41 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         log.Fatal("Failed to create peer connection: ", err)
     }
 
+    var ice_state webrtc.ICEConnectionState = webrtc.ICEConnectionStateNew
+    var conn_state webrtc.PeerConnectionState = webrtc.PeerConnectionStateNew
+
     pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
         ldebug(st.cid, "ice connection state changed to ", state)
-    })
-    pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-        ldebug(st.cid, "connection state switched to ", state)
+        ice_state = state
     })
 
-    pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-        ldebug(st.cid, "Remote track dectected: ", track.SSRC())
+    pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+        ldebug(st.cid, "connection state switched to ", state)
+        conn_state = state
+    })
+
+    pc.OnTrack(func(tr *webrtc.TrackRemote, rc *webrtc.RTPReceiver) {
+        go func() {
+            b := make([]byte, MAX_RTP_LEN)
+            for {
+                _, _, err := tr.Read(b)
+                if err != nil {
+                    ldebug(st.cid, "RTP read goroutine exit")
+                    break
+                }
+            }
+        }()
+
+        go func() {
+            b := make([]byte, MAX_RTP_LEN)
+            for {
+                _, _, err := rc.Read(b)
+                if err != nil {
+                    ldebug(st.cid, "RTCP read goroutine exit")
+                    break
+                }
+            }
+        }()
     })
 
     offer, err := pc.CreateOffer(nil)
@@ -305,32 +371,83 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         panic(err)
     }
 
-    gather := webrtc.GatheringCompletePromise(pc)
     if err = pc.SetLocalDescription(offer); err != nil {
         panic(err)
     }
-    <-gather
 
     remote := webrtc.SessionDescription{SDP: info.orig_sdp, Type: webrtc.SDPTypeAnswer}
     if err = pc.SetRemoteDescription(remote); err != nil {
         panic(err)
     }
 
-    // Here we start the goroutine for stats collecting
-    
-    // go func() {
-    //     for {
-    //         select {
-    //         case <-time.After(time.Second * 10):
-    //             report := pc.GetStats()
-    //             fmt.Printf("report: %v\n", report)
-    //             rc := pc.GetReceivers()
-    //             for _, r := range rc  {
-    //             
-    //             }
-    //         }
-    //     }
-    // }()
+    for {
+        select {
+        case <-time.After(time.Second * time.Duration(stats_report_interval)):
+            ts := pc.GetTransceivers()
+            rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
+            rpt += fmt.Sprintf(", \"ICE_State\":\"%v\"", ice_state.String())
+            rpt += fmt.Sprintf(", \"Conn_State\":\"%v\"", conn_state.String())
+            videos := []string{}
+            audios := []string{}
+            remote := ""
+            for _, t := range ts {
+                tk := t.Receiver().Track()
+                ssrc := tk.SSRC()
+                o := fmt.Sprintf("{\"SSRC\":%v", ssrc)
+                o += fmt.Sprintf(", \"Type\":\"%v\"", tk.Kind().String())
+                r := g.Get(uint32(ssrc))
+                o += fmt.Sprintf(", \"PacketReceived\":%v", r.InboundRTPStreamStats.PacketsReceived)
+                o += fmt.Sprintf(", \"PacketLost\":%v", r.InboundRTPStreamStats.PacketsLost)
+                o += fmt.Sprintf(", \"Jitter\":%v", r.InboundRTPStreamStats.Jitter)
+                o += fmt.Sprintf(", \"LastPacketReceivedTimestamp\":\"%v\"", r.InboundRTPStreamStats.LastPacketReceivedTimestamp)
+                o += fmt.Sprintf(", \"HeaderBytesReceived\":%v", r.InboundRTPStreamStats.HeaderBytesReceived)
+                o += fmt.Sprintf(", \"BytesReceived\":%v", r.InboundRTPStreamStats.BytesReceived)
+                o += fmt.Sprintf(", \"NACKCount\":%v", r.InboundRTPStreamStats.NACKCount)
+                o += fmt.Sprintf(", \"PLICount\":%v", r.InboundRTPStreamStats.PLICount)
+                o += fmt.Sprintf(", \"FIRCount\":%v", r.InboundRTPStreamStats.FIRCount)
+                o += "}"
+                if tk.Kind() == webrtc.RTPCodecTypeAudio {
+                    audios = append(audios, o)
+                } else {
+                    videos = append(videos, o)
+                }
+                if remote == "" {
+                    remote += "{"
+                    remote += fmt.Sprintf("\"BytesSent\":%v", r.RemoteOutboundRTPStreamStats.BytesSent)
+                    remote += fmt.Sprintf(", \"PacketsSent\":%v", r.RemoteOutboundRTPStreamStats.PacketsSent)
+                    remote += fmt.Sprintf(", \"ReportsSent\":%v", r.RemoteOutboundRTPStreamStats.ReportsSent)
+                    remote += fmt.Sprintf(", \"RoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.RoundTripTime)
+                    remote += fmt.Sprintf(", \"RemoteTimeStamp\":\"%v\"", r.RemoteOutboundRTPStreamStats.RemoteTimeStamp)
+                    remote += fmt.Sprintf(", \"TotalRoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.TotalRoundTripTime)
+                    remote += fmt.Sprintf(", \"RoundTripTimeMeasurements\":%v", r.RemoteOutboundRTPStreamStats.RoundTripTimeMeasurements)
+                    remote += "}"
+                }
+            }
+            videos_str := "["
+            for i, v := range videos {
+                if i != 0 {
+                    videos_str += ","
+                }
+                videos_str += v
+            }
+            videos_str += "]"
+            rpt += fmt.Sprintf(", \"VideoStreams\":%v", videos_str)
+
+            audios_str := "["
+            for i, a := range audios {
+                if i != 0 {
+                    audios_str += ","
+                }
+                audios_str += a
+            }
+            audios_str += "]"
+            rpt += fmt.Sprintf(", \"AudioStreams\":%v", audios_str)
+            rpt += fmt.Sprintf(", \"RemoteOutboundRTPStreamStats\":%v", remote)
+            rpt += "}\n"
+
+            go send_stats([]byte(rpt), *cfg.stats_dst)
+        }
+    }
 }
 
 // This is a way to directly manipulate transport objects and ice gather object
@@ -461,7 +578,7 @@ func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
                     }
                 }
                 // go receive_streaming_direct(cfg, st, info)
-                go receive_streaming(cfg, st, info)
+                go receive_streaming(cfg, st, info, false)
             }
         } else {
             if n, ok := ev["name"]; !ok {
