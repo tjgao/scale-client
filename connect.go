@@ -242,7 +242,7 @@ func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
 
 // This uses PeerConnection which has better encapsulation
 // it also dynmically generates answer SDP
-func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo, pion_dbg bool) {
+func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     if cfg.rate_limit_connecting != nil {
         defer func() {
             b := st.connecting.Load()
@@ -307,7 +307,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo, pion_
     s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
     s.SetLite(info.Ice.Lite)
-    if pion_dbg {
+    if cfg.pion_dbg {
         lf := logging.NewDefaultLoggerFactory()
         lf.DefaultLogLevel = logging.LogLevelDebug
         s.LoggerFactory = lf
@@ -573,7 +573,7 @@ func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
                     }
                 }
                 // go receive_streaming_direct(cfg, st, info)
-                go receive_streaming(cfg, st, info, false)
+                go receive_streaming(cfg, st, info)
             }
         } else {
             if n, ok := ev["name"]; !ok {

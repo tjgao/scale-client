@@ -26,6 +26,8 @@ type AppCfg struct {
     rate_limit_connecting *chan struct{}
     // stats channel
     stats_ch *chan []byte
+    // flag for turn on pion dbg 
+    pion_dbg bool
 }
 
 type send_stats_func func([]byte, string)
@@ -88,6 +90,7 @@ func main() {
     num := flag.Int("n", 1, "Number of connections")
     logLevel := flag.String("l", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
     logfile := flag.String("f", "", "Log file path, log output goes to log file instead of console")
+    pion_dbg := flag.Bool("d", false, "Turn on pion debug so that more internal info will be printed out")
     wait_on_inactive := flag.Bool("e", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit")
     max_connecting := flag.Uint64("r", 0, "Specify the maximum number of connecting attempts, no limit if set to 0")
     _stats_report_inteval := flag.Int64("i", 10, "The stats report interval")
@@ -130,6 +133,7 @@ func main() {
         stats_report_interval = *_stats_report_inteval
     }
     cfg.wait_on_inactive = *wait_on_inactive
+    cfg.pion_dbg = *pion_dbg
 
     if *max_connecting > 0 {
         cfg.max_concurrent_connecting = *max_connecting
