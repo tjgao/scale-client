@@ -24,8 +24,8 @@ type AppCfg struct {
     max_concurrent_connecting uint64
     // connecting rate limit data
     rate_limit_connecting *chan struct{}
-    // stats path
-    stats_dst *string
+    // stats channel
+    stats_ch *chan []byte
 }
 
 type send_stats_func func([]byte, string)
@@ -47,22 +47,33 @@ func send_stats_disk(b []byte, target string) {
 }
 
 func send_stats_post(b []byte, target string) {
-    req, err := http.NewRequest("POST", target, bytes.NewBuffer(b))
-    req.Header.Set("Content-Type", "application/json")
-    if err != nil {
-        panic(err)
-    }
+    go func() {
+        req, err := http.NewRequest("POST", target, bytes.NewBuffer(b))
+        req.Header.Set("Content-Type", "application/json")
+        if err != nil {
+            panic(err)
+        }
 
-    client := &http.Client{}
-    resp, err := client.Do(req)
-    if err != nil {
-        panic(err)
-    }
-    resp.Body.Close()
+        client := &http.Client{}
+        resp, err := client.Do(req)
+        if err != nil {
+            panic(err)
+        }
+        resp.Body.Close()
+    }()
 }
 
 // by default, it will just write the file
 var send_stats send_stats_func = send_stats_disk
+
+func notify_send_stats(st chan []byte, dst string) {
+    for {
+        select {
+        case b := <-st:
+            send_stats(b, dst)
+        }
+    }
+}
 
 func main() {
     logLevelTable := map[string]log.Level{
@@ -81,7 +92,7 @@ func main() {
     max_connecting := flag.Uint64("r", 0, "Specify the maximum number of connecting attempts, no limit if set to 0")
     _stats_report_inteval := flag.Int64("i", 10, "The stats report interval")
     cfg.viewer_url = flag.String("u", "", "URL to access")
-    cfg.stats_dst = flag.String("t", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
+    stats_dst := flag.String("t", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
 
     flag.Parse()
     if level, ok := logLevelTable[*logLevel]; ok {
@@ -106,10 +117,10 @@ func main() {
         log.SetOutput(f)
     }
 
-    if *cfg.stats_dst == "" {
+    if *stats_dst == "" {
         cur := time.Now()
-        *cfg.stats_dst = cur.Format("2006-01-05_15:04:05.stats.txt")
-    } else if strings.HasPrefix(*cfg.stats_dst, "http://") || strings.HasPrefix(*cfg.stats_dst, "https://") {
+        *stats_dst = cur.Format("2006-01-02_15:04:05.stats.txt")
+    } else if strings.HasPrefix(*stats_dst, "http://") || strings.HasPrefix(*stats_dst, "https://") {
         send_stats = send_stats_post
     }
 
@@ -129,6 +140,11 @@ func main() {
             *cfg.rate_limit_connecting <- struct{}{}
         }
     }
+
+    // we make the channel with plent of buffer
+    c := make(chan []byte, *num)
+    cfg.stats_ch = &c
+    go notify_send_stats(*cfg.stats_ch, *stats_dst)
 
     // we'll need to call rand soon, let's do seed here
     rand.Seed(time.Now().UnixNano())

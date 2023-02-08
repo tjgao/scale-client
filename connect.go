@@ -240,11 +240,6 @@ func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
     return conn
 }
 
-func convert_stats(st *stats.Stats) []byte {
-
-    return nil
-}
-
 // This uses PeerConnection which has better encapsulation
 // it also dynmically generates answer SDP
 func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo, pion_dbg bool) {
@@ -399,7 +394,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo, pion_
                 o += fmt.Sprintf(", \"PacketReceived\":%v", r.InboundRTPStreamStats.PacketsReceived)
                 o += fmt.Sprintf(", \"PacketLost\":%v", r.InboundRTPStreamStats.PacketsLost)
                 o += fmt.Sprintf(", \"Jitter\":%v", r.InboundRTPStreamStats.Jitter)
-                o += fmt.Sprintf(", \"LastPacketReceivedTimestamp\":\"%v\"", r.InboundRTPStreamStats.LastPacketReceivedTimestamp)
+                o += fmt.Sprintf(", \"LastPacketReceivedTimestamp\":%f", float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.UnixNano())/1000000000.0)
                 o += fmt.Sprintf(", \"HeaderBytesReceived\":%v", r.InboundRTPStreamStats.HeaderBytesReceived)
                 o += fmt.Sprintf(", \"BytesReceived\":%v", r.InboundRTPStreamStats.BytesReceived)
                 o += fmt.Sprintf(", \"NACKCount\":%v", r.InboundRTPStreamStats.NACKCount)
@@ -417,7 +412,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo, pion_
                     remote += fmt.Sprintf(", \"PacketsSent\":%v", r.RemoteOutboundRTPStreamStats.PacketsSent)
                     remote += fmt.Sprintf(", \"ReportsSent\":%v", r.RemoteOutboundRTPStreamStats.ReportsSent)
                     remote += fmt.Sprintf(", \"RoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.RoundTripTime)
-                    remote += fmt.Sprintf(", \"RemoteTimeStamp\":\"%v\"", r.RemoteOutboundRTPStreamStats.RemoteTimeStamp)
+                    remote += fmt.Sprintf(", \"RemoteTimeStamp\":%f", float64(r.RemoteOutboundRTPStreamStats.RemoteTimeStamp.UnixNano())/1000000000.0)
                     remote += fmt.Sprintf(", \"TotalRoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.TotalRoundTripTime)
                     remote += fmt.Sprintf(", \"RoundTripTimeMeasurements\":%v", r.RemoteOutboundRTPStreamStats.RoundTripTimeMeasurements)
                     remote += "}"
@@ -445,7 +440,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo, pion_
             rpt += fmt.Sprintf(", \"RemoteOutboundRTPStreamStats\":%v", remote)
             rpt += "}\n"
 
-            go send_stats([]byte(rpt), *cfg.stats_dst)
+            *cfg.stats_ch <- []byte(rpt)
         }
     }
 }
