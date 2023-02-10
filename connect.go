@@ -282,15 +282,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     }
 
     var g stats.Getter
-    o := func(i *stats.Interceptor) error {
-        f := i.RecorderFactory
-        i.RecorderFactory = func(ssrc uint32, clockRate float64) stats.Recorder {
-            ldebug(st.cid, " ssrc -> ", ssrc, " clock rate -> ", clockRate)
-            return f(ssrc, clockRate)
-        }
-        return nil
-    }
-    statsIntFactory, err := stats.NewInterceptor(o)
+    statsIntFactory, err := stats.NewInterceptor()
     if err != nil {
         panic(err)
     }
