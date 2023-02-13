@@ -28,6 +28,11 @@ type AppCfg struct {
     stats_ch *chan []byte
     // flag for turn on pion dbg 
     pion_dbg bool
+    // test name
+    test_name *string
+    // remote codec
+    codec *string
+
 }
 
 type send_stats_func func([]byte, string)
@@ -87,15 +92,17 @@ func main() {
     }
 
     var cfg AppCfg
-    num := flag.Int("n", 1, "Number of connections")
-    logLevel := flag.String("l", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
-    logfile := flag.String("f", "", "Log file path, log output goes to log file instead of console")
-    pion_dbg := flag.Bool("d", false, "Turn on pion debug so that more internal info will be printed out")
-    wait_on_inactive := flag.Bool("e", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit")
-    max_connecting := flag.Uint64("r", 0, "Specify the maximum number of connecting attempts, no limit if set to 0")
-    _stats_report_inteval := flag.Int64("i", 10, "The stats report interval")
-    cfg.viewer_url = flag.String("u", "", "URL to access")
-    stats_dst := flag.String("t", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
+    cfg.test_name = flag.String("name", "", "Name of the test")
+    cfg.codec = flag.String("codec", "", "Codec used by remote side. Valid options are h264, vp8 and vp9, default is h264")
+    num := flag.Int("num", 1, "Number of connections")
+    logLevel := flag.String("level", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
+    logfile := flag.String("logfile", "", "Log file path, log output goes to log file instead of console")
+    pion_dbg := flag.Bool("dbg", false, "Turn on pion debug so that more internal info will be printed out")
+    wait_on_inactive := flag.Bool("wait_on_inactive", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit")
+    max_connecting := flag.Uint64("max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0")
+    _stats_report_inteval := flag.Int64("report_interval", 10, "The stats report interval")
+    cfg.viewer_url = flag.String("url", "", "URL to access")
+    stats_dst := flag.String("report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
 
     flag.Parse()
     if level, ok := logLevelTable[*logLevel]; ok {
@@ -120,11 +127,19 @@ func main() {
         log.SetOutput(f)
     }
 
+    cur := time.Now()
+    if *cfg.test_name == "" {
+        *cfg.test_name = cur.Format("2006-01-02_15:04:05_") + genRandomHash(4)
+    }
+
     if *stats_dst == "" {
-        cur := time.Now()
         *stats_dst = cur.Format("2006-01-02_15:04:05.stats.txt")
     } else if strings.HasPrefix(*stats_dst, "http://") || strings.HasPrefix(*stats_dst, "https://") {
         send_stats = send_stats_post
+    }
+
+    if *cfg.codec == "" {
+        *cfg.codec = "h264"
     }
 
     if *_stats_report_inteval < 0 {

@@ -253,6 +253,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         }()
     }
 
+    var err error
     m := &webrtc.MediaEngine{}
 
     videoRTCPFeedback := []webrtc.RTCPFeedback{
@@ -260,37 +261,41 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         {Type: "ccm", Parameter: "fir"},
         {Type: "nack", Parameter: ""},
         {Type: "nack", Parameter: "pli"},
+        {Type: "transport-cc", Parameter: ""},
     }
 
-    err := m.RegisterCodec(
-        webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
-            MimeType: webrtc.MimeTypeH264, ClockRate: 90000, Channels: 0,
-            SDPFmtpLine:  "packetization-mode=1",
-            RTCPFeedback: videoRTCPFeedback,
-        },
-            PayloadType: 102}, webrtc.RTPCodecTypeVideo)
-    if err != nil {
-        panic(err)
+    fmtp_line := ""
+    mime_type := webrtc.MimeTypeH264
+    clock_rate := 90000
+    payload_type := 0
+
+    switch {
+    case *cfg.codec == "h264":
+        fmtp_line = "packetization-mode=1"
+        clock_rate = 90000
+        mime_type = webrtc.MimeTypeH264
+        payload_type = 102
+    case *cfg.codec == "vp8":
+        fmtp_line = ""
+        clock_rate = 90000
+        mime_type = webrtc.MimeTypeVP8
+        payload_type = 96
+    case *cfg.codec == "vp9":
+        fmtp_line = ""
+        clock_rate = 90000
+        mime_type = webrtc.MimeTypeVP9
+        payload_type = 98
+    default:
+        panic(errors.New(fmt.Sprintf("Unknown codec: %v", *cfg.codec)))
     }
+
     err = m.RegisterCodec(
         webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
-            MimeType: webrtc.MimeTypeVP8, ClockRate: 90000, Channels: 0,
-            SDPFmtpLine:  "",
+            MimeType: mime_type, ClockRate: uint32(clock_rate), Channels: 0,
+            SDPFmtpLine:  fmtp_line,
             RTCPFeedback: videoRTCPFeedback,
         },
-            PayloadType: 96}, webrtc.RTPCodecTypeVideo)
-
-    if err != nil {
-        panic(err)
-    }
-
-    err = m.RegisterCodec(
-        webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
-            MimeType: webrtc.MimeTypeVP9, ClockRate: 90000, Channels: 0,
-            SDPFmtpLine:  "profile-id=0",
-            RTCPFeedback: videoRTCPFeedback,
-        },
-            PayloadType: 96}, webrtc.RTPCodecTypeVideo)
+            PayloadType: webrtc.PayloadType(payload_type)}, webrtc.RTPCodecTypeVideo)
     if err != nil {
         panic(err)
     }
@@ -394,6 +399,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         case <-time.After(time.Second * time.Duration(stats_report_interval)):
             ts := pc.GetTransceivers()
             rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
+            rpt += fmt.Sprintf(", \"TestName\":\"%v\"", *cfg.test_name)
             rpt += fmt.Sprintf(", \"ICE_State\":\"%v\"", ice_state.String())
             rpt += fmt.Sprintf(", \"Conn_State\":\"%v\"", conn_state.String())
             videos := []string{}
