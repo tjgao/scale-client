@@ -272,6 +272,28 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     if err != nil {
         panic(err)
     }
+    err = m.RegisterCodec(
+        webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
+            MimeType: webrtc.MimeTypeVP8, ClockRate: 90000, Channels: 0,
+            SDPFmtpLine:  "",
+            RTCPFeedback: videoRTCPFeedback,
+        },
+            PayloadType: 96}, webrtc.RTPCodecTypeVideo)
+
+    if err != nil {
+        panic(err)
+    }
+
+    err = m.RegisterCodec(
+        webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
+            MimeType: webrtc.MimeTypeVP9, ClockRate: 90000, Channels: 0,
+            SDPFmtpLine:  "profile-id=0",
+            RTCPFeedback: videoRTCPFeedback,
+        },
+            PayloadType: 96}, webrtc.RTPCodecTypeVideo)
+    if err != nil {
+        panic(err)
+    }
 
     err = m.RegisterCodec(
         webrtc.RTPCodecParameters{
