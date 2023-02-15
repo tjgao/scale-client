@@ -19,6 +19,7 @@ import (
     "net/http"
     "net/url"
     "regexp"
+    "strings"
     "time"
 
     "github.com/gorilla/websocket"
@@ -82,7 +83,7 @@ func ldebug(args ...interface{}) {
     log.Debug("(", args[0], ") ", left)
 }
 
-const subscribe_url string = "https://director.millicast.com/api/director/subscribe"
+const subscribe_url string = "https://director%v.millicast.com/api/director/subscribe"
 
 // parse the url to get stream account id and name
 func parse(url string) map[string]string {
@@ -682,12 +683,24 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
     }
 
     client := &http.Client{}
-    resp, err := client.Get(*cfg.viewer_url)
-    if err != nil {
-        log.Fatal("Failed to access url: ", err)
-    }
+    // resp, err := client.Get(*cfg.viewer_url)
+    // if err != nil {
+    //     log.Fatal("Failed to access url: ", err)
+    // }
+    //
+    // resp.Body.Close()
 
-    resp.Body.Close()
+    domain_splits :=  strings.Split(strings.Split(*cfg.viewer_url, ".")[0], "-")
+    domain := ""
+    if len(domain_splits) > 1 {
+        for _, s := range domain_splits[1:] {
+            domain += "-"
+            domain += s
+        }
+    } 
+
+    sub_url := fmt.Sprintf(subscribe_url, domain)
+
 
     for {
         streamName := m["streamName"]
@@ -698,11 +711,11 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
             log.Fatal("Failed to marshal json data: ", err)
         }
 
-        req, err := http.NewRequest("POST", subscribe_url, bytes.NewBuffer(bs))
+        req, err := http.NewRequest("POST", sub_url, bytes.NewBuffer(bs))
         req.Header.Set("Content-Type", "application/json")
-        resp, err = client.Do(req)
+        resp, err := client.Do(req)
         if err != nil {
-            log.Fatal("Failed to post request json to url: ", subscribe_url, ",  err: ", err)
+            log.Fatal("Failed to post request json to url: ", sub_url, ",  err: ", err)
         }
 
         body, err := ioutil.ReadAll(resp.Body)
