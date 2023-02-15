@@ -103,6 +103,7 @@ func main() {
     max_connecting := flag.Uint64("max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0. It will disable connecting_time if set")
     _stats_report_inteval := flag.Int64("report_interval", 10, "The stats report interval")
     cfg.viewer_url = flag.String("url", "", "URL to access")
+    retry_times := flag.Uint64("Retry times", 0, "If a connection received stopped events, it will retry a specified number of times")
     stats_dst := flag.String("report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
 
     flag.Parse()
@@ -182,7 +183,7 @@ func main() {
     }
 
     for i := 0; i < *num; i++ {
-        go connect(wg, i, &cfg)
+        go connect(wg, i, &cfg, *retry_times)
         if conn_interval > 0 && i != *num - 1 {
             time.Sleep(time.Duration(conn_interval * 1e9))
         }

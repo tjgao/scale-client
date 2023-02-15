@@ -636,7 +636,7 @@ func get_fingerprint(cert tls.Certificate) string {
     return buf.String()
 }
 
-func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
+func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
     defer wg.Done()
     m := parse(*cfg.viewer_url)
     if _, ok := m["streamAccountId"]; !ok {
@@ -689,84 +689,91 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
 
     resp.Body.Close()
 
-    streamName := m["streamName"]
-    // we now send json request to the subscribe url
-    var reqJson = ReqJson{StreamAccountId: m["streamAccountId"], StreamName: m["streamName"]}
-    bs, err := json.Marshal(&reqJson)
-    if err != nil {
-        log.Fatal("Failed to marshal json data: ", err)
-    }
-
-    req, err := http.NewRequest("POST", subscribe_url, bytes.NewBuffer(bs))
-    req.Header.Set("Content-Type", "application/json")
-    resp, err = client.Do(req)
-    if err != nil {
-        log.Fatal("Failed to post request json to url: ", subscribe_url, ",  err: ", err)
-    }
-
-    body, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        log.Fatal("Failed to read data from response, err: ", err)
-    }
-
-    var result map[string]interface{}
-    err = json.Unmarshal(body, &result)
-    if err != nil {
-        log.Fatal("Failed to unmarshal returned response json: ", body)
-    }
-
-    sub := check_result(result)
-    if sub == nil {
-        log.Fatal("Server's response is not valid")
-    } else {
-        state.SubResp = sub
-    }
-
-    wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
-    if err != nil {
-        log.Fatal("The wss url seems to be invalid: ", err)
-    }
-
-    // we now visit wss url
-    conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
-    if err != nil {
-        log.Fatal("Failed to connect websocket url: ", wss_url.String())
-    }
-    defer conn.Close()
-
-    req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
-    state.local_sdp = req_sdp
-
-    // prepare json
-    _events := []string{"active", "inactive", "layers", "viewercount"}
-    var sdp_mp = map[string]interface{}{"sdp": req_sdp, "streamId": streamName, "events": _events}
-    var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
-    bs, err = json.Marshal(&cmd)
-    if err != nil {
-        log.Fatal("Failed to marshal json data: ", err)
-    }
-
-    // Send view command
-    err = conn.WriteMessage(websocket.TextMessage, bs)
-    if err != nil {
-        log.Fatal("Failed to send sdp via websocket connection: ", err)
-    }
-
-    // Now wait for response and other events
     for {
-        t, buf, err := conn.ReadMessage()
+        streamName := m["streamName"]
+        // we now send json request to the subscribe url
+        var reqJson = ReqJson{StreamAccountId: m["streamAccountId"], StreamName: m["streamName"]}
+        bs, err := json.Marshal(&reqJson)
         if err != nil {
-            lerror(cid, "Failed to read message from websocket: ", err)
-            break
+            log.Fatal("Failed to marshal json data: ", err)
         }
-        if t == websocket.TextMessage {
-            if !on_event(cfg, &state, buf) {
-                linfo(cid, "Connection task exit")
+
+        req, err := http.NewRequest("POST", subscribe_url, bytes.NewBuffer(bs))
+        req.Header.Set("Content-Type", "application/json")
+        resp, err = client.Do(req)
+        if err != nil {
+            log.Fatal("Failed to post request json to url: ", subscribe_url, ",  err: ", err)
+        }
+
+        body, err := ioutil.ReadAll(resp.Body)
+        if err != nil {
+            log.Fatal("Failed to read data from response, err: ", err)
+        }
+
+        var result map[string]interface{}
+        err = json.Unmarshal(body, &result)
+        if err != nil {
+            log.Fatal("Failed to unmarshal returned response json: ", body)
+        }
+
+        sub := check_result(result)
+        if sub == nil {
+            log.Fatal("Server's response is not valid")
+        } else {
+            state.SubResp = sub
+        }
+
+        wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
+        if err != nil {
+            log.Fatal("The wss url seems to be invalid: ", err)
+        }
+
+        // we now visit wss url
+        conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
+        if err != nil {
+            log.Fatal("Failed to connect websocket url: ", wss_url.String())
+        }
+        defer conn.Close()
+
+        req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
+        state.local_sdp = req_sdp
+
+        // prepare json
+        _events := []string{"active", "inactive", "layers", "viewercount"}
+        var sdp_mp = map[string]interface{}{"sdp": req_sdp, "streamId": streamName, "events": _events}
+        var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
+        bs, err = json.Marshal(&cmd)
+        if err != nil {
+            log.Fatal("Failed to marshal json data: ", err)
+        }
+
+        // Send view command
+        err = conn.WriteMessage(websocket.TextMessage, bs)
+        if err != nil {
+            log.Fatal("Failed to send sdp via websocket connection: ", err)
+        }
+
+        // Now wait for response and other events
+        for {
+            t, buf, err := conn.ReadMessage()
+            if err != nil {
+                lerror(cid, "Failed to read message from websocket: ", err)
                 break
             }
+            if t == websocket.TextMessage {
+                if !on_event(cfg, &state, buf) {
+                    linfo(cid, "Connection task exit")
+                    break
+                }
+            } else {
+                // we recieved binary
+                ldebug(cid, "Received binary data message")
+            }
+        }
+        if retry == 0 {
+            break
         } else {
-            // we recieved binary
-            ldebug(cid, "Received binary data message")
+            retry--
         }
     }
 }
