@@ -99,7 +99,8 @@ func main() {
     logfile := flag.String("logfile", "", "Log file path, log output goes to log file instead of console")
     pion_dbg := flag.Bool("dbg", false, "Turn on pion debug so that more internal info will be printed out")
     wait_on_inactive := flag.Bool("wait_on_inactive", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit")
-    max_connecting := flag.Uint64("max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0")
+    connecting_time := flag.Uint64("connecting_time", 0, "All the connections will be evenly distributed in the time (seconds) to avoid burst connections")
+    max_connecting := flag.Uint64("max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0. It will disable connecting_time if set")
     _stats_report_inteval := flag.Int64("report_interval", 10, "The stats report interval")
     cfg.viewer_url = flag.String("url", "", "URL to access")
     stats_dst := flag.String("report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
@@ -158,6 +159,10 @@ func main() {
         for i := 0; i < int(cfg.max_concurrent_connecting); i++ {
             *cfg.rate_limit_connecting <- struct{}{}
         }
+        if *connecting_time > 0 {
+            log.Debug("connecting_time is disabled as max_connecting is specified")
+            *connecting_time = 0
+        }
     }
 
     // we make the channel with plent of buffer
@@ -171,8 +176,16 @@ func main() {
     wg := new(sync.WaitGroup)
     wg.Add(*num)
 
+    conn_interval := 0.0
+    if *connecting_time > 0 {
+        conn_interval = float64(*connecting_time) / float64(*num)
+    }
+
     for i := 0; i < *num; i++ {
         go connect(wg, i, &cfg)
+        if conn_interval > 0 && i != *num - 1 {
+            time.Sleep(time.Duration(conn_interval * 1e9))
+        }
     }
 
     wg.Wait()
