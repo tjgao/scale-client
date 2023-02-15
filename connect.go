@@ -394,75 +394,77 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         panic(err)
     }
 
-    for {
-        select {
-        case <-time.After(time.Second * time.Duration(stats_report_interval)):
-            ts := pc.GetTransceivers()
-            rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
-            rpt += fmt.Sprintf(", \"TestName\":\"%v\"", *cfg.test_name)
-            rpt += fmt.Sprintf(", \"ICE_State\":\"%v\"", ice_state.String())
-            rpt += fmt.Sprintf(", \"Conn_State\":\"%v\"", conn_state.String())
-            videos := []string{}
-            audios := []string{}
-            remote := ""
-            for _, t := range ts {
-                tk := t.Receiver().Track()
-                ssrc := tk.SSRC()
-                o := fmt.Sprintf("{\"SSRC\":%v", ssrc)
-                o += fmt.Sprintf(", \"Type\":\"%v\"", tk.Kind().String())
-                r := g.Get(uint32(ssrc))
-                o += fmt.Sprintf(", \"PacketReceived\":%v", r.InboundRTPStreamStats.PacketsReceived)
-                o += fmt.Sprintf(", \"PacketLost\":%v", r.InboundRTPStreamStats.PacketsLost)
-                o += fmt.Sprintf(", \"Jitter\":%v", r.InboundRTPStreamStats.Jitter)
-                o += fmt.Sprintf(", \"LastPacketReceivedTimestamp\":%f", float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.UnixNano())/1000000000.0)
-                o += fmt.Sprintf(", \"HeaderBytesReceived\":%v", r.InboundRTPStreamStats.HeaderBytesReceived)
-                o += fmt.Sprintf(", \"BytesReceived\":%v", r.InboundRTPStreamStats.BytesReceived)
-                o += fmt.Sprintf(", \"NACKCount\":%v", r.InboundRTPStreamStats.NACKCount)
-                o += fmt.Sprintf(", \"PLICount\":%v", r.InboundRTPStreamStats.PLICount)
-                o += fmt.Sprintf(", \"FIRCount\":%v", r.InboundRTPStreamStats.FIRCount)
-                o += "}"
-                if tk.Kind() == webrtc.RTPCodecTypeAudio {
-                    audios = append(audios, o)
-                } else {
-                    videos = append(videos, o)
+    go func() {
+        for {
+            select {
+            case <-time.After(time.Second * time.Duration(stats_report_interval)):
+                ts := pc.GetTransceivers()
+                rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
+                rpt += fmt.Sprintf(", \"TestName\":\"%v\"", *cfg.test_name)
+                rpt += fmt.Sprintf(", \"ICE_State\":\"%v\"", ice_state.String())
+                rpt += fmt.Sprintf(", \"Conn_State\":\"%v\"", conn_state.String())
+                videos := []string{}
+                audios := []string{}
+                remote := ""
+                for _, t := range ts {
+                    tk := t.Receiver().Track()
+                    ssrc := tk.SSRC()
+                    o := fmt.Sprintf("{\"SSRC\":%v", ssrc)
+                    o += fmt.Sprintf(", \"Type\":\"%v\"", tk.Kind().String())
+                    r := g.Get(uint32(ssrc))
+                    o += fmt.Sprintf(", \"PacketReceived\":%v", r.InboundRTPStreamStats.PacketsReceived)
+                    o += fmt.Sprintf(", \"PacketLost\":%v", r.InboundRTPStreamStats.PacketsLost)
+                    o += fmt.Sprintf(", \"Jitter\":%v", r.InboundRTPStreamStats.Jitter)
+                    o += fmt.Sprintf(", \"LastPacketReceivedTimestamp\":%f", float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.UnixNano())/1000000000.0)
+                    o += fmt.Sprintf(", \"HeaderBytesReceived\":%v", r.InboundRTPStreamStats.HeaderBytesReceived)
+                    o += fmt.Sprintf(", \"BytesReceived\":%v", r.InboundRTPStreamStats.BytesReceived)
+                    o += fmt.Sprintf(", \"NACKCount\":%v", r.InboundRTPStreamStats.NACKCount)
+                    o += fmt.Sprintf(", \"PLICount\":%v", r.InboundRTPStreamStats.PLICount)
+                    o += fmt.Sprintf(", \"FIRCount\":%v", r.InboundRTPStreamStats.FIRCount)
+                    o += "}"
+                    if tk.Kind() == webrtc.RTPCodecTypeAudio {
+                        audios = append(audios, o)
+                    } else {
+                        videos = append(videos, o)
+                    }
+                    if remote == "" {
+                        remote += "{"
+                        remote += fmt.Sprintf("\"BytesSent\":%v", r.RemoteOutboundRTPStreamStats.BytesSent)
+                        remote += fmt.Sprintf(", \"PacketsSent\":%v", r.RemoteOutboundRTPStreamStats.PacketsSent)
+                        remote += fmt.Sprintf(", \"ReportsSent\":%v", r.RemoteOutboundRTPStreamStats.ReportsSent)
+                        remote += fmt.Sprintf(", \"RoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.RoundTripTime)
+                        remote += fmt.Sprintf(", \"RemoteTimeStamp\":%f", float64(r.RemoteOutboundRTPStreamStats.RemoteTimeStamp.UnixNano())/1000000000.0)
+                        remote += fmt.Sprintf(", \"TotalRoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.TotalRoundTripTime)
+                        remote += fmt.Sprintf(", \"RoundTripTimeMeasurements\":%v", r.RemoteOutboundRTPStreamStats.RoundTripTimeMeasurements)
+                        remote += "}"
+                    }
                 }
-                if remote == "" {
-                    remote += "{"
-                    remote += fmt.Sprintf("\"BytesSent\":%v", r.RemoteOutboundRTPStreamStats.BytesSent)
-                    remote += fmt.Sprintf(", \"PacketsSent\":%v", r.RemoteOutboundRTPStreamStats.PacketsSent)
-                    remote += fmt.Sprintf(", \"ReportsSent\":%v", r.RemoteOutboundRTPStreamStats.ReportsSent)
-                    remote += fmt.Sprintf(", \"RoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.RoundTripTime)
-                    remote += fmt.Sprintf(", \"RemoteTimeStamp\":%f", float64(r.RemoteOutboundRTPStreamStats.RemoteTimeStamp.UnixNano())/1000000000.0)
-                    remote += fmt.Sprintf(", \"TotalRoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.TotalRoundTripTime)
-                    remote += fmt.Sprintf(", \"RoundTripTimeMeasurements\":%v", r.RemoteOutboundRTPStreamStats.RoundTripTimeMeasurements)
-                    remote += "}"
+                videos_str := "["
+                for i, v := range videos {
+                    if i != 0 {
+                        videos_str += ","
+                    }
+                    videos_str += v
                 }
-            }
-            videos_str := "["
-            for i, v := range videos {
-                if i != 0 {
-                    videos_str += ","
-                }
-                videos_str += v
-            }
-            videos_str += "]"
-            rpt += fmt.Sprintf(", \"VideoStreams\":%v", videos_str)
+                videos_str += "]"
+                rpt += fmt.Sprintf(", \"VideoStreams\":%v", videos_str)
 
-            audios_str := "["
-            for i, a := range audios {
-                if i != 0 {
-                    audios_str += ","
+                audios_str := "["
+                for i, a := range audios {
+                    if i != 0 {
+                        audios_str += ","
+                    }
+                    audios_str += a
                 }
-                audios_str += a
-            }
-            audios_str += "]"
-            rpt += fmt.Sprintf(", \"AudioStreams\":%v", audios_str)
-            rpt += fmt.Sprintf(", \"RemoteOutboundRTPStreamStats\":%v", remote)
-            rpt += "}\n"
+                audios_str += "]"
+                rpt += fmt.Sprintf(", \"AudioStreams\":%v", audios_str)
+                rpt += fmt.Sprintf(", \"RemoteOutboundRTPStreamStats\":%v", remote)
+                rpt += "}\n"
 
-            *cfg.stats_ch <- []byte(rpt)
+                *cfg.stats_ch <- []byte(rpt)
+            }
         }
-    }
+    }()
 }
 
 // This is a way to directly manipulate transport objects and ice gather object
