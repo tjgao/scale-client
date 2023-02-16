@@ -66,6 +66,7 @@ type RunningState struct {
     SubResp    *SubscribeResp     // subscribe response
     connecting atomic.Bool
     local_sdp  string
+    conn_exit  chan struct{}
 }
 
 func lerror(args ...interface{}) {
@@ -398,6 +399,9 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     go func() {
         for {
             select {
+            case <-st.conn_exit:
+                pc.Close()
+                break
             case <-time.After(time.Second * time.Duration(stats_report_interval)):
                 ts := pc.GetTransceivers()
                 rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
@@ -603,7 +607,7 @@ func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
                 lerror(st.cid, "No name for this event: ", string(buf))
             } else {
                 if n == "stopped" {
-                    linfo(st.cid, "Server stopped streaming")
+                    linfo(st.cid, fmt.Sprintf("Server stopped streaming: %v", string(buf)))
                     return false
                 } else if n == "inactive" {
                     // This means the server temporarily pauses streaming
@@ -665,6 +669,10 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
     }
 
     var state = RunningState{cid: cid, Cert: *cert, LocalUser: genRandomHash(16), LocalPwd: genRandomHash(48)}
+
+
+    req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
+    state.local_sdp = req_sdp
 
     // try to get the permissio to do connecting if needed
     if cfg.rate_limit_connecting != nil {
@@ -748,9 +756,6 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
         }
         defer conn.Close()
 
-        req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
-        state.local_sdp = req_sdp
-
         // prepare json
         _events := []string{"active", "inactive", "layers", "viewercount"}
         var sdp_mp = map[string]interface{}{"sdp": req_sdp, "streamId": streamName, "events": _events}
@@ -766,6 +771,8 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
             log.Fatal("Failed to send sdp via websocket connection: ", err)
         }
 
+        state.conn_exit = make(chan struct{}) 
+
         // Now wait for response and other events
         for {
             t, buf, err := conn.ReadMessage()
@@ -775,6 +782,7 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
             }
             if t == websocket.TextMessage {
                 if !on_event(cfg, &state, buf) {
+                    close(state.conn_exit)
                     linfo(cid, "Connection task exit")
                     break
                 }
