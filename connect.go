@@ -405,6 +405,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     }
 
     go func() {
+        last_stats := map[webrtc.SSRC]stats.InboundRTPStreamStats{}
         for {
             select {
             case <-st.conn_exit:
@@ -436,6 +437,20 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
                         o += fmt.Sprintf(", \"NACKCount\":%v", r.InboundRTPStreamStats.NACKCount)
                         o += fmt.Sprintf(", \"PLICount\":%v", r.InboundRTPStreamStats.PLICount)
                         o += fmt.Sprintf(", \"FIRCount\":%v", r.InboundRTPStreamStats.FIRCount)
+                        last, ok := last_stats[ssrc]
+                        packets_loss_percentage := float64(0)
+                        bitrate := float64(0)
+                        if ok {
+                            packets_lost := float64(r.InboundRTPStreamStats.PacketsLost - last.PacketsLost)
+                            packets_received := float64(r.InboundRTPStreamStats.PacketsReceived - last.PacketsReceived)
+                            packets_loss_percentage = 100.0 * packets_lost / packets_received
+                            bytes_received := float64(r.InboundRTPStreamStats.BytesReceived - last.BytesReceived)
+                            time_diff := float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.Sub(last.LastPacketReceivedTimestamp).Seconds())
+                            bitrate = (8 * bytes_received / time_diff) / (1024.0 * 1024.0)
+                        }
+                        o += fmt.Sprintf(", \"PacketLossPercentage\":%v", packets_loss_percentage)
+                        o += fmt.Sprintf(", \"Bitrate\":%v", bitrate)
+                        last_stats[ssrc] = r.InboundRTPStreamStats
                     }
                     o += "}"
                     if tk.Kind() == webrtc.RTPCodecTypeAudio {
