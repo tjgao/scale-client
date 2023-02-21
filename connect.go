@@ -327,7 +327,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
 
     s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
-    s.SetLite(info.Ice.Lite)
+    s.SetICETimeouts(5 * time.Second, 25 * time.Second, 500 * time.Millisecond)
     if cfg.pion_dbg {
         lf := logging.NewDefaultLoggerFactory()
         lf.DefaultLogLevel = logging.LogLevelDebug
@@ -337,7 +337,6 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
 
     wcfg := webrtc.Configuration{
         Certificates: []webrtc.Certificate{st.Cert},
-        SDPSemantics: webrtc.SDPSemanticsPlanB,
     }
 
     pc, err := api.NewPeerConnection(wcfg)
@@ -358,13 +357,22 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         conn_state = state
     })
 
+    _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+    if err != nil {
+        panic(err)
+    }
+    _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+    if err != nil {
+        panic(err)
+    }
+
     pc.OnTrack(func(tr *webrtc.TrackRemote, rc *webrtc.RTPReceiver) {
         go func() {
             b := make([]byte, MAX_RTP_LEN)
             for {
                 _, _, err := tr.Read(b)
                 if err != nil {
-                    ldebug(st.cid, "RTP read goroutine exit")
+                    ldebug(st.cid, fmt.Sprintf("RTP read goroutine for %v: %v exit", tr.Kind().String(), tr.SSRC()))
                     break
                 }
             }
@@ -401,7 +409,8 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
             select {
             case <-st.conn_exit:
                 pc.Close()
-                break
+                ldebug(st.cid, "close peerconnection")
+                return
             case <-time.After(time.Second * time.Duration(stats_report_interval)):
                 ts := pc.GetTransceivers()
                 rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
@@ -417,15 +426,17 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
                     o := fmt.Sprintf("{\"SSRC\":%v", ssrc)
                     o += fmt.Sprintf(", \"Type\":\"%v\"", tk.Kind().String())
                     r := g.Get(uint32(ssrc))
-                    o += fmt.Sprintf(", \"PacketReceived\":%v", r.InboundRTPStreamStats.PacketsReceived)
-                    o += fmt.Sprintf(", \"PacketLost\":%v", r.InboundRTPStreamStats.PacketsLost)
-                    o += fmt.Sprintf(", \"Jitter\":%v", r.InboundRTPStreamStats.Jitter)
-                    o += fmt.Sprintf(", \"LastPacketReceivedTimestamp\":%f", float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.UnixNano())/1000000000.0)
-                    o += fmt.Sprintf(", \"HeaderBytesReceived\":%v", r.InboundRTPStreamStats.HeaderBytesReceived)
-                    o += fmt.Sprintf(", \"BytesReceived\":%v", r.InboundRTPStreamStats.BytesReceived)
-                    o += fmt.Sprintf(", \"NACKCount\":%v", r.InboundRTPStreamStats.NACKCount)
-                    o += fmt.Sprintf(", \"PLICount\":%v", r.InboundRTPStreamStats.PLICount)
-                    o += fmt.Sprintf(", \"FIRCount\":%v", r.InboundRTPStreamStats.FIRCount)
+                    if r != nil {
+                        o += fmt.Sprintf(", \"PacketReceived\":%v", r.InboundRTPStreamStats.PacketsReceived)
+                        o += fmt.Sprintf(", \"PacketLost\":%v", r.InboundRTPStreamStats.PacketsLost)
+                        o += fmt.Sprintf(", \"Jitter\":%v", r.InboundRTPStreamStats.Jitter)
+                        o += fmt.Sprintf(", \"LastPacketReceivedTimestamp\":%f", float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.UnixNano())/1000000000.0)
+                        o += fmt.Sprintf(", \"HeaderBytesReceived\":%v", r.InboundRTPStreamStats.HeaderBytesReceived)
+                        o += fmt.Sprintf(", \"BytesReceived\":%v", r.InboundRTPStreamStats.BytesReceived)
+                        o += fmt.Sprintf(", \"NACKCount\":%v", r.InboundRTPStreamStats.NACKCount)
+                        o += fmt.Sprintf(", \"PLICount\":%v", r.InboundRTPStreamStats.PLICount)
+                        o += fmt.Sprintf(", \"FIRCount\":%v", r.InboundRTPStreamStats.FIRCount)
+                    }
                     o += "}"
                     if tk.Kind() == webrtc.RTPCodecTypeAudio {
                         audios = append(audios, o)
@@ -434,13 +445,15 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
                     }
                     if remote == "" {
                         remote += "{"
-                        remote += fmt.Sprintf("\"BytesSent\":%v", r.RemoteOutboundRTPStreamStats.BytesSent)
-                        remote += fmt.Sprintf(", \"PacketsSent\":%v", r.RemoteOutboundRTPStreamStats.PacketsSent)
-                        remote += fmt.Sprintf(", \"ReportsSent\":%v", r.RemoteOutboundRTPStreamStats.ReportsSent)
-                        remote += fmt.Sprintf(", \"RoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.RoundTripTime)
-                        remote += fmt.Sprintf(", \"RemoteTimeStamp\":%f", float64(r.RemoteOutboundRTPStreamStats.RemoteTimeStamp.UnixNano())/1000000000.0)
-                        remote += fmt.Sprintf(", \"TotalRoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.TotalRoundTripTime)
-                        remote += fmt.Sprintf(", \"RoundTripTimeMeasurements\":%v", r.RemoteOutboundRTPStreamStats.RoundTripTimeMeasurements)
+                        if r != nil {
+                            remote += fmt.Sprintf("\"BytesSent\":%v", r.RemoteOutboundRTPStreamStats.BytesSent)
+                            remote += fmt.Sprintf(", \"PacketsSent\":%v", r.RemoteOutboundRTPStreamStats.PacketsSent)
+                            remote += fmt.Sprintf(", \"ReportsSent\":%v", r.RemoteOutboundRTPStreamStats.ReportsSent)
+                            remote += fmt.Sprintf(", \"RoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.RoundTripTime)
+                            remote += fmt.Sprintf(", \"RemoteTimeStamp\":%f", float64(r.RemoteOutboundRTPStreamStats.RemoteTimeStamp.UnixNano())/1000000000.0)
+                            remote += fmt.Sprintf(", \"TotalRoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.TotalRoundTripTime)
+                            remote += fmt.Sprintf(", \"RoundTripTimeMeasurements\":%v", r.RemoteOutboundRTPStreamStats.RoundTripTimeMeasurements)
+                        }
                         remote += "}"
                     }
                 }
@@ -615,6 +628,7 @@ func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
                     // because when server starts streaming again,  DTLS conn will just work
                     // linfo(st.cid, "Server is inactive")
                     // if wait_on_inactive is true, we'll stay
+                    ldebug(st.cid, "Server is inactive")
                     return cfg.wait_on_inactive
                 } else if n == "active" {
                     /// This means the server continues streaming
