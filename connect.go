@@ -446,10 +446,10 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
                             packets_loss_percentage = 100.0 * packets_lost / packets_received
                             bytes_received := float64(r.InboundRTPStreamStats.BytesReceived - last.BytesReceived)
                             time_diff := float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.Sub(last.LastPacketReceivedTimestamp).Seconds())
-                            bitrate = (8 * bytes_received / time_diff) / (1024.0 * 1024.0)
+                            bitrate = (8 * bytes_received / time_diff) / 1024.0
                         }
-                        o += fmt.Sprintf(", \"PacketLossPercentage\":%v", packets_loss_percentage)
-                        o += fmt.Sprintf(", \"Bitrate\":%v", bitrate)
+                        o += fmt.Sprintf(", \"PacketLossPercentage\":%.2f", packets_loss_percentage)
+                        o += fmt.Sprintf(", \"Bitrate\":%.2f", bitrate)
                         last_stats[ssrc] = r.InboundRTPStreamStats
                     }
                     o += "}"
