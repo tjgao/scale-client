@@ -748,32 +748,48 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
             log.Fatal("Failed to marshal json data: ", err)
         }
 
+        // sometimes, especially a bunch of connections are created, server may return 
+        // error, so we'll try a few times with pause
+        var sub *SubscribeResp
         req, err := http.NewRequest("POST", sub_url, bytes.NewBuffer(bs))
         req.Header.Set("Content-Type", "application/json")
-        resp, err := client.Do(req)
-        if err != nil {
-            log.Fatal("Failed to post request json to url: ", sub_url, ",  err: ", err)
-        }
+        for _i := 0; _i<5; _i++ {
+            if _i > 0 {
+                time.Sleep(1 * time.Second)
+            }
+            resp, err := client.Do(req)
+            if err != nil {
+                log.Error("Failed to post request json to url: ", sub_url, ",  err: ", err)
+                continue
+            }
 
-        body, err := ioutil.ReadAll(resp.Body)
-        if err != nil {
-            log.Fatal("Failed to read data from response, err: ", err)
-        }
+            body, err := ioutil.ReadAll(resp.Body)
+            if err != nil {
+                log.Error("Failed to read data from response, err: ", err)
+                continue
+            }
 
-        var result map[string]interface{}
-        err = json.Unmarshal(body, &result)
-        if err != nil {
-            log.Fatal("Failed to unmarshal returned response json: ", body)
-        }
+            var result map[string]interface{}
+            err = json.Unmarshal(body, &result)
+            if err != nil {
+                log.Error("Failed to unmarshal returned response json: ", body)
+                continue
+            }
 
-        sub := check_result(result)
+            sub = check_result(result)
+            if sub == nil {
+                log.Error("Server's response is not valid:", string(body))
+                continue
+            } else {
+                state.SubResp = sub
+            }
+            break
+        }
         if sub == nil {
-            log.Fatal("Server's response is not valid")
-        } else {
-            state.SubResp = sub
+            log.Fatal("Server returns error all the time, stop trying")
         }
-
         wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
+
         if err != nil {
             log.Fatal("The wss url seems to be invalid: ", err)
         }
