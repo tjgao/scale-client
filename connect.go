@@ -367,9 +367,9 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
 
     pc.OnTrack(func(tr *webrtc.TrackRemote, rc *webrtc.RTPReceiver) {
         go func() {
-            b := make([]byte, MAX_RTP_LEN)
+            rtp_buf := make([]byte, MAX_RTP_LEN)
             for {
-                _, _, err := tr.Read(b)
+                _, _, err := tr.Read(rtp_buf)
                 if err != nil {
                     ldebug(st.cid, fmt.Sprintf("RTP read goroutine for %v: %v exit", tr.Kind().String(), tr.SSRC()))
                     break
@@ -378,9 +378,9 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         }()
 
         go func() {
-            b := make([]byte, MAX_RTP_LEN)
+            rtcp_buf := make([]byte, MAX_RTP_LEN)
             for {
-                _, _, err := rc.Read(b)
+                _, _, err := rc.Read(rtcp_buf)
                 if err != nil {
                     ldebug(st.cid, "RTCP read goroutine exit")
                     break
@@ -669,7 +669,7 @@ func get_fingerprint(cert tls.Certificate) string {
     return buf.String()
 }
 
-func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
+func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
     defer wg.Done()
     m := parse(*cfg.viewer_url)
     if _, ok := m["streamAccountId"]; !ok {
@@ -822,6 +822,8 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
             t, buf, err := conn.ReadMessage()
             if err != nil {
                 lerror(cid, "Failed to read message from websocket: ", err)
+                close(state.conn_exit)
+                linfo(cid, "Connection task exit due to websocket error")
                 break
             }
             if t == websocket.TextMessage {
@@ -837,7 +839,10 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry uint64) {
         }
         if retry == 0 {
             break
+        } else if retry < 0 {
+            // If retry is negative, it will retry forever
         } else {
+            linfo(cid, "Connection is recreated!")
             retry--
         }
     }
