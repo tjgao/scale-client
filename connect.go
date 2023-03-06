@@ -382,7 +382,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
             for {
                 _, _, err := rc.Read(rtcp_buf)
                 if err != nil {
-                    ldebug(st.cid, "RTCP read goroutine exit")
+                    ldebug(st.cid, "RTCP read goroutine for %v: %v exit", rc.Track().Kind().String(), rc.Track().SSRC())
                     break
                 }
             }
