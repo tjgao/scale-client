@@ -327,10 +327,9 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
 
     s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
-    s.SetICETimeouts(5 * time.Second, 25 * time.Second, 500 * time.Millisecond)
     if cfg.pion_dbg {
         lf := logging.NewDefaultLoggerFactory()
-        lf.DefaultLogLevel = logging.LogLevelDebug
+        lf.DefaultLogLevel = logging.LogLevelInfo
         s.LoggerFactory = lf
     }
     api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithSettingEngine(s), webrtc.WithInterceptorRegistry(ic))
