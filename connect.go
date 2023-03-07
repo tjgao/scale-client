@@ -382,7 +382,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
             for {
                 _, _, err := rc.Read(rtcp_buf)
                 if err != nil {
-                    ldebug(st.cid, "RTCP read goroutine for %v: %v exit", rc.Track().Kind().String(), rc.Track().SSRC())
+                    ldebug(st.cid, fmt.Sprintf("RTCP read goroutine for %v: %v exit", rc.Track().Kind().String(), rc.Track().SSRC()))
                     break
                 }
             }
@@ -823,12 +823,14 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             if err != nil {
                 lerror(cid, "Failed to read message from websocket: ", err)
                 close(state.conn_exit)
+                conn.Close()
                 linfo(cid, "Connection task exit due to websocket error")
                 break
             }
             if t == websocket.TextMessage {
                 if !on_event(cfg, &state, buf) {
                     close(state.conn_exit)
+                    conn.Close()
                     linfo(cid, "Connection task exit")
                     break
                 }
