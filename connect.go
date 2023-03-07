@@ -796,9 +796,11 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         // we now visit wss url
         conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
         if err != nil {
-            log.Fatal("Failed to connect websocket url: ", wss_url.String())
+            log.Error("Failed to connect websocket url: ", wss_url.String())
+            if retry == 0 {
+                return
+            }
         }
-        defer conn.Close()
 
         // prepare json
         _events := []string{"active", "inactive", "layers", "viewercount"}
