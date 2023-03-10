@@ -669,6 +669,18 @@ func get_fingerprint(cert tls.Certificate) string {
     return buf.String()
 }
 
+func keep_trying(cid int, retry *int64, msg string) bool {
+    lerror(cid, msg)
+    if *retry == 0 {
+        return false
+    } else if *retry > 0 {
+        linfo(cid, "Try reconnecting")
+        *retry--
+    }
+
+    return true
+}
+
 func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
     defer wg.Done()
     m := parse(*cfg.viewer_url)
@@ -733,7 +745,7 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             domain += "-"
             domain += s
         }
-    } 
+    }
 
     sub_url := fmt.Sprintf(subscribe_url, domain)
 
@@ -746,8 +758,7 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         if err != nil {
             log.Fatal("Failed to marshal json data: ", err)
         }
-
-        // sometimes, especially a bunch of connections are created, server may return 
+        // sometimes, especially a bunch of connections are created, server may return
         // error, so we'll try a few times with pause
         var sub *SubscribeResp
         req, err := http.NewRequest("POST", sub_url, bytes.NewBuffer(bs))
@@ -785,26 +796,30 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             break
         }
         if sub == nil {
-            log.Fatal("Server returns error all the time, stop trying")
+            if !keep_trying(cid, &retry, "Failed to decode json returned from server") {
+                return
+            } else {
+                continue
+            }
         }
         wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
 
         if err != nil {
-            log.Fatal("The wss url seems to be invalid: ", err)
+            if !keep_trying(cid, &retry, fmt.Sprintf("The wss url seems to be invalid: %v", err)) {
+                return
+            } else {
+                continue
+            }
         }
 
         // we now visit wss url
         conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
         if err != nil {
-            lerror(cid, "Failed to connect websocket url: ", wss_url.String())
-            if retry == 0 {
+            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to connect websocket url: %v", wss_url.String())) {
                 return
-            } else if retry > 0 {
-                linfo(cid, "Try reconnecting")
-                retry--
+            } else {
+                continue
             }
-            
-            continue
         }
 
         // prepare json
@@ -813,16 +828,24 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
         bs, err = json.Marshal(&cmd)
         if err != nil {
-            log.Fatal("Failed to marshal json data: ", err)
+            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to marshal json data: %v", err)) {
+                return
+            } else {
+                continue
+            }
         }
 
         // Send view command
         err = conn.WriteMessage(websocket.TextMessage, bs)
         if err != nil {
-            log.Fatal("Failed to send sdp via websocket connection: ", err)
+            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to send sdp via websocket connection: %v", err)) {
+                return
+            } else {
+                continue
+            }
         }
 
-        state.conn_exit = make(chan struct{}) 
+        state.conn_exit = make(chan struct{})
 
         // Now wait for response and other events
         for {
