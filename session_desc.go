@@ -34,6 +34,7 @@ type trackDetails struct {
 }
 
 type AnswerSDPInfo struct {
+    orig_sdp      string
     Ice           ICEInfo
     Dtls          DTLSInfo
     Candidates    []string
@@ -129,6 +130,7 @@ func readAnswerSDP(answer string) *AnswerSDPInfo {
     sd.Unmarshal([]byte(answer))
 
     var info = AnswerSDPInfo{}
+    info.orig_sdp = answer
 
     // global attributes
     for _, a := range sd.Attributes {

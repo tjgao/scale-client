@@ -1,7 +1,6 @@
 package main
 
 import (
-    "sync/atomic"
     "bytes"
     "context"
     "crypto/ecdsa"
@@ -11,39 +10,39 @@ import (
     "crypto/tls"
     "fmt"
     "sync"
+    "sync/atomic"
 
-    // "crypto/x509"
     "encoding/json"
     "io/ioutil"
 
-    // "net"
     "errors"
     "net/http"
     "net/url"
     "regexp"
+    "strings"
+    "time"
 
     "github.com/gorilla/websocket"
     "github.com/pion/ice/v2"
+    "github.com/pion/interceptor"
+    "github.com/pion/interceptor/pkg/stats"
+    "github.com/pion/logging"
     "github.com/pion/webrtc/v3"
 
     log "github.com/sirupsen/logrus"
 )
+
+const MAX_RTP_LEN = 2000
 
 type ReqJson struct {
     StreamAccountId string `json:"streamAccountId"`
     StreamName      string `json:"streamName"`
 }
 
-type IceServer struct {
-    Urls       []string
-    Username   string
-    Credential string
-}
-
 type SubscribeResp struct {
     Url        string
     Jwt        string
-    IceServers []IceServer
+    IceServers []webrtc.ICEServer
 }
 
 type TransCommand struct {
@@ -66,6 +65,8 @@ type RunningState struct {
     LocalPwd   string             // ice pwd
     SubResp    *SubscribeResp     // subscribe response
     connecting atomic.Bool
+    local_sdp  string
+    conn_exit  chan struct{}
 }
 
 func lerror(args ...interface{}) {
@@ -83,7 +84,7 @@ func ldebug(args ...interface{}) {
     log.Debug("(", args[0], ") ", left)
 }
 
-const subscribe_url string = "https://director.millicast.com/api/director/subscribe"
+const subscribe_url string = "https://director%v.millicast.com/api/director/subscribe"
 
 // parse the url to get stream account id and name
 func parse(url string) map[string]string {
@@ -98,12 +99,12 @@ func parse(url string) map[string]string {
 }
 
 func addIceServer(o interface{}, sub *SubscribeResp) {
-    var ice IceServer
+    var ice webrtc.ICEServer
     m := o.(map[string]interface{})
     if u, ok := m["urls"]; ok {
         _u := u.([]interface{})
         for _, uu := range _u {
-            ice.Urls = append(ice.Urls, uu.(string))
+            ice.URLs = append(ice.URLs, uu.(string))
         }
     } else {
         log.Error("Empty ice server json object")
@@ -241,7 +242,266 @@ func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
     return conn
 }
 
-func receive_rtp_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
+// This uses PeerConnection which has better encapsulation
+// it also dynmically generates answer SDP
+func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
+    if cfg.rate_limit_connecting != nil {
+        defer func() {
+            b := st.connecting.Load()
+            if b {
+                st.connecting.Store(false)
+                *cfg.rate_limit_connecting <- struct{}{}
+            }
+        }()
+    }
+
+    var err error
+    m := &webrtc.MediaEngine{}
+
+    videoRTCPFeedback := []webrtc.RTCPFeedback{
+        {Type: "goog-remb", Parameter: ""},
+        {Type: "ccm", Parameter: "fir"},
+        {Type: "nack", Parameter: ""},
+        {Type: "nack", Parameter: "pli"},
+        {Type: "transport-cc", Parameter: ""},
+    }
+
+    fmtp_line := ""
+    mime_type := webrtc.MimeTypeH264
+    clock_rate := 90000
+    payload_type := 0
+
+    switch {
+    case *cfg.codec == "h264":
+        fmtp_line = "packetization-mode=1"
+        clock_rate = 90000
+        mime_type = webrtc.MimeTypeH264
+        payload_type = 102
+    case *cfg.codec == "vp8":
+        fmtp_line = ""
+        clock_rate = 90000
+        mime_type = webrtc.MimeTypeVP8
+        payload_type = 96
+    case *cfg.codec == "vp9":
+        fmtp_line = ""
+        clock_rate = 90000
+        mime_type = webrtc.MimeTypeVP9
+        payload_type = 98
+    default:
+        panic(errors.New(fmt.Sprintf("Unknown codec: %v", *cfg.codec)))
+    }
+
+    err = m.RegisterCodec(
+        webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
+            MimeType: mime_type, ClockRate: uint32(clock_rate), Channels: 0,
+            SDPFmtpLine:  fmtp_line,
+            RTCPFeedback: videoRTCPFeedback,
+        },
+            PayloadType: webrtc.PayloadType(payload_type)}, webrtc.RTPCodecTypeVideo)
+    if err != nil {
+        panic(err)
+    }
+
+    err = m.RegisterCodec(
+        webrtc.RTPCodecParameters{
+            RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 0},
+            PayloadType:        115}, webrtc.RTPCodecTypeAudio)
+    if err != nil {
+        panic(err)
+    }
+
+    var g stats.Getter
+    statsIntFactory, err := stats.NewInterceptor()
+    if err != nil {
+        panic(err)
+    }
+    statsIntFactory.OnNewPeerConnection(func(s string, getter stats.Getter) {
+        g = getter
+    })
+
+    ic := &interceptor.Registry{}
+    ic.Add(statsIntFactory)
+    if err := webrtc.RegisterDefaultInterceptors(m, ic); err != nil {
+        panic(err)
+    }
+
+    s := webrtc.SettingEngine{}
+    s.SetICECredentials(st.LocalUser, st.LocalPwd)
+    if cfg.pion_dbg {
+        lf := logging.NewDefaultLoggerFactory()
+        lf.DefaultLogLevel = logging.LogLevelInfo
+        s.LoggerFactory = lf
+    }
+    api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithSettingEngine(s), webrtc.WithInterceptorRegistry(ic))
+
+    wcfg := webrtc.Configuration{
+        Certificates: []webrtc.Certificate{st.Cert},
+    }
+
+    pc, err := api.NewPeerConnection(wcfg)
+    if err != nil {
+        log.Fatal("Failed to create peer connection: ", err)
+    }
+
+    var ice_state webrtc.ICEConnectionState = webrtc.ICEConnectionStateNew
+    var conn_state webrtc.PeerConnectionState = webrtc.PeerConnectionStateNew
+
+    pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+        ldebug(st.cid, "ice connection state changed to ", state)
+        ice_state = state
+    })
+
+    pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+        ldebug(st.cid, "connection state switched to ", state)
+        conn_state = state
+    })
+
+    _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+    if err != nil {
+        panic(err)
+    }
+    _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+    if err != nil {
+        panic(err)
+    }
+
+    pc.OnTrack(func(tr *webrtc.TrackRemote, rc *webrtc.RTPReceiver) {
+        go func() {
+            rtp_buf := make([]byte, MAX_RTP_LEN)
+            for {
+                _, _, err := tr.Read(rtp_buf)
+                if err != nil {
+                    ldebug(st.cid, fmt.Sprintf("RTP read goroutine for %v: %v exit", tr.Kind().String(), tr.SSRC()))
+                    break
+                }
+            }
+        }()
+
+        go func() {
+            rtcp_buf := make([]byte, MAX_RTP_LEN)
+            for {
+                _, _, err := rc.Read(rtcp_buf)
+                if err != nil {
+                    ldebug(st.cid, fmt.Sprintf("RTCP read goroutine for %v: %v exit", rc.Track().Kind().String(), rc.Track().SSRC()))
+                    break
+                }
+            }
+        }()
+    })
+
+    offer, err := pc.CreateOffer(nil)
+    if err != nil {
+        panic(err)
+    }
+
+    if err = pc.SetLocalDescription(offer); err != nil {
+        panic(err)
+    }
+
+    remote := webrtc.SessionDescription{SDP: info.orig_sdp, Type: webrtc.SDPTypeAnswer}
+    if err = pc.SetRemoteDescription(remote); err != nil {
+        panic(err)
+    }
+
+    go func() {
+        last_stats := map[webrtc.SSRC]stats.InboundRTPStreamStats{}
+        for {
+            select {
+            case <-st.conn_exit:
+                pc.Close()
+                ldebug(st.cid, "close peerconnection")
+                return
+            case <-time.After(time.Second * time.Duration(stats_report_interval)):
+                ts := pc.GetTransceivers()
+                rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
+                rpt += fmt.Sprintf(", \"TestName\":\"%v\"", *cfg.test_name)
+                rpt += fmt.Sprintf(", \"ICE_State\":\"%v\"", ice_state.String())
+                rpt += fmt.Sprintf(", \"Conn_State\":\"%v\"", conn_state.String())
+                videos := []string{}
+                audios := []string{}
+                remote := ""
+                for _, t := range ts {
+                    tk := t.Receiver().Track()
+                    ssrc := tk.SSRC()
+                    o := fmt.Sprintf("{\"SSRC\":%v", ssrc)
+                    o += fmt.Sprintf(", \"Type\":\"%v\"", tk.Kind().String())
+                    r := g.Get(uint32(ssrc))
+                    if r != nil {
+                        o += fmt.Sprintf(", \"PacketReceived\":%v", r.InboundRTPStreamStats.PacketsReceived)
+                        o += fmt.Sprintf(", \"PacketLost\":%v", r.InboundRTPStreamStats.PacketsLost)
+                        o += fmt.Sprintf(", \"Jitter\":%v", r.InboundRTPStreamStats.Jitter)
+                        o += fmt.Sprintf(", \"LastPacketReceivedTimestamp\":%f", float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.UnixNano())/1000000000.0)
+                        o += fmt.Sprintf(", \"HeaderBytesReceived\":%v", r.InboundRTPStreamStats.HeaderBytesReceived)
+                        o += fmt.Sprintf(", \"BytesReceived\":%v", r.InboundRTPStreamStats.BytesReceived)
+                        o += fmt.Sprintf(", \"NACKCount\":%v", r.InboundRTPStreamStats.NACKCount)
+                        o += fmt.Sprintf(", \"PLICount\":%v", r.InboundRTPStreamStats.PLICount)
+                        o += fmt.Sprintf(", \"FIRCount\":%v", r.InboundRTPStreamStats.FIRCount)
+                        last, ok := last_stats[ssrc]
+                        packets_loss_percentage := float64(0)
+                        bitrate := float64(0)
+                        if ok {
+                            packets_lost := float64(r.InboundRTPStreamStats.PacketsLost - last.PacketsLost)
+                            packets_received := float64(r.InboundRTPStreamStats.PacketsReceived - last.PacketsReceived)
+                            packets_loss_percentage = 100.0 * packets_lost / packets_received
+                            bytes_received := float64(r.InboundRTPStreamStats.BytesReceived - last.BytesReceived)
+                            time_diff := float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.Sub(last.LastPacketReceivedTimestamp).Seconds())
+                            bitrate = (8 * bytes_received / time_diff) / 1024.0
+                        }
+                        o += fmt.Sprintf(", \"PacketLossPercentage\":%.2f", packets_loss_percentage)
+                        o += fmt.Sprintf(", \"Bitrate\":%.2f", bitrate)
+                        last_stats[ssrc] = r.InboundRTPStreamStats
+                    }
+                    o += "}"
+                    if tk.Kind() == webrtc.RTPCodecTypeAudio {
+                        audios = append(audios, o)
+                    } else {
+                        videos = append(videos, o)
+                    }
+                    if remote == "" {
+                        remote += "{"
+                        if r != nil {
+                            remote += fmt.Sprintf("\"BytesSent\":%v", r.RemoteOutboundRTPStreamStats.BytesSent)
+                            remote += fmt.Sprintf(", \"PacketsSent\":%v", r.RemoteOutboundRTPStreamStats.PacketsSent)
+                            remote += fmt.Sprintf(", \"ReportsSent\":%v", r.RemoteOutboundRTPStreamStats.ReportsSent)
+                            remote += fmt.Sprintf(", \"RoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.RoundTripTime)
+                            remote += fmt.Sprintf(", \"RemoteTimeStamp\":%f", float64(r.RemoteOutboundRTPStreamStats.RemoteTimeStamp.UnixNano())/1000000000.0)
+                            remote += fmt.Sprintf(", \"TotalRoundTripTime\":\"%v\"", r.RemoteOutboundRTPStreamStats.TotalRoundTripTime)
+                            remote += fmt.Sprintf(", \"RoundTripTimeMeasurements\":%v", r.RemoteOutboundRTPStreamStats.RoundTripTimeMeasurements)
+                        }
+                        remote += "}"
+                    }
+                }
+                videos_str := "["
+                for i, v := range videos {
+                    if i != 0 {
+                        videos_str += ","
+                    }
+                    videos_str += v
+                }
+                videos_str += "]"
+                rpt += fmt.Sprintf(", \"VideoStreams\":%v", videos_str)
+
+                audios_str := "["
+                for i, a := range audios {
+                    if i != 0 {
+                        audios_str += ","
+                    }
+                    audios_str += a
+                }
+                audios_str += "]"
+                rpt += fmt.Sprintf(", \"AudioStreams\":%v", audios_str)
+                rpt += fmt.Sprintf(", \"RemoteOutboundRTPStreamStats\":%v", remote)
+                rpt += "}\n"
+
+                *cfg.stats_ch <- []byte(rpt)
+            }
+        }
+    }()
+}
+
+// This is a way to directly manipulate transport objects and ice gather object
+// It also takes advantage of a SDP template
+func receive_streaming_direct(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     if cfg.rate_limit_connecting != nil {
         defer func() {
             b := st.connecting.Load()
@@ -252,11 +512,7 @@ func receive_rtp_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
         }()
     }
     // prepare ICE gathering options
-    iceOptions := webrtc.ICEGatherOptions{}
-    for _, is := range st.SubResp.IceServers {
-        iceOptions.ICEServers = append(iceOptions.ICEServers,
-            webrtc.ICEServer{URLs: is.Urls, Username: is.Username, Credential: is.Credential})
-    }
+    iceOptions := webrtc.ICEGatherOptions{ICEServers: st.SubResp.IceServers}
 
     s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
@@ -370,14 +626,15 @@ func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
                         return false
                     }
                 }
-                go receive_rtp_streaming(cfg, st, info)
+                // go receive_streaming_direct(cfg, st, info)
+                go receive_streaming(cfg, st, info)
             }
         } else {
             if n, ok := ev["name"]; !ok {
                 lerror(st.cid, "No name for this event: ", string(buf))
             } else {
                 if n == "stopped" {
-                    linfo(st.cid, "Server stopped streaming")
+                    linfo(st.cid, fmt.Sprintf("Server stopped streaming: %v", string(buf)))
                     return false
                 } else if n == "inactive" {
                     // This means the server temporarily pauses streaming
@@ -385,6 +642,7 @@ func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
                     // because when server starts streaming again,  DTLS conn will just work
                     // linfo(st.cid, "Server is inactive")
                     // if wait_on_inactive is true, we'll stay
+                    ldebug(st.cid, "Server is inactive")
                     return cfg.wait_on_inactive
                 } else if n == "active" {
                     /// This means the server continues streaming
@@ -411,7 +669,19 @@ func get_fingerprint(cert tls.Certificate) string {
     return buf.String()
 }
 
-func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
+func keep_trying(cid int, retry *int64, msg string) bool {
+    lerror(cid, msg)
+    if *retry == 0 {
+        return false
+    } else if *retry > 0 {
+        linfo(cid, "Try reconnecting")
+        *retry--
+    }
+
+    return true
+}
+
+func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
     defer wg.Done()
     m := parse(*cfg.viewer_url)
     if _, ok := m["streamAccountId"]; !ok {
@@ -438,13 +708,17 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
         log.Fatal("Failed to calculate fingerprint from cert: ", err)
     }
 
-    var state = RunningState{cid, *cert, genRandomHash(16), genRandomHash(48), nil, atomic.Bool{}}
+    var state = RunningState{cid: cid, Cert: *cert, LocalUser: genRandomHash(16), LocalPwd: genRandomHash(48)}
+
+
+    req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
+    state.local_sdp = req_sdp
 
     // try to get the permissio to do connecting if needed
     if cfg.rate_limit_connecting != nil {
         <-*cfg.rate_limit_connecting
         state.connecting.Store(true)
-        // The reason we do this is , it is possible that may not have the chance
+        // The reason we do this is , it is possible it may not have the chance
         // to call receive_rtp_streaming so we won't be able to notify the channel
         // we've finished connecting
         defer func() {
@@ -457,90 +731,151 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg) {
     }
 
     client := &http.Client{}
-    resp, err := client.Get(*cfg.viewer_url)
-    if err != nil {
-        log.Fatal("Failed to access url: ", err)
+    // resp, err := client.Get(*cfg.viewer_url)
+    // if err != nil {
+    //     log.Fatal("Failed to access url: ", err)
+    // }
+    //
+    // resp.Body.Close()
+
+    domain_splits :=  strings.Split(strings.Split(*cfg.viewer_url, ".")[0], "-")
+    domain := ""
+    if len(domain_splits) > 1 {
+        for _, s := range domain_splits[1:] {
+            domain += "-"
+            domain += s
+        }
     }
 
-    resp.Body.Close()
+    sub_url := fmt.Sprintf(subscribe_url, domain)
 
-    streamName := m["streamName"]
-    // we now send json request to the subscribe url
-    var reqJson = ReqJson{StreamAccountId: m["streamAccountId"], StreamName: m["streamName"]}
-    bs, err := json.Marshal(&reqJson)
-    if err != nil {
-        log.Fatal("Failed to marshal json data: ", err)
-    }
 
-    req, err := http.NewRequest("POST", subscribe_url, bytes.NewBuffer(bs))
-    req.Header.Set("Content-Type", "application/json")
-    resp, err = client.Do(req)
-    if err != nil {
-        log.Fatal("Failed to post request json to url: ", subscribe_url, ",  err: ", err)
-    }
-
-    body, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        log.Fatal("Failed to read data from response, err: ", err)
-    }
-
-    var result map[string]interface{}
-    err = json.Unmarshal(body, &result)
-    if err != nil {
-        log.Fatal("Failed to unmarshal returned response json: ", body)
-    }
-
-    sub := check_result(result)
-    if sub == nil {
-        log.Fatal("Server's response is not valid")
-    } else {
-        state.SubResp = sub
-    }
-
-    wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
-    if err != nil {
-        log.Fatal("The wss url seems to be invalid: ", err)
-    }
-
-    // we now visit wss url
-    conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
-    if err != nil {
-        log.Fatal("Failed to connect websocket url: ", wss_url.String())
-    }
-    defer conn.Close()
-
-    req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
-
-    // prepare json
-    _events := []string{"active", "inactive", "layers", "viewercount"}
-    var sdp_mp = map[string]interface{}{"sdp": req_sdp, "streamId": streamName, "events": _events}
-    var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
-    bs, err = json.Marshal(&cmd)
-    if err != nil {
-        log.Fatal("Failed to marshal json data: ", err)
-    }
-
-    // Send view command
-    err = conn.WriteMessage(websocket.TextMessage, bs)
-    if err != nil {
-        log.Fatal("Failed to send sdp via websocket connection: ", err)
-    }
-
-    // Now wait for response and other events
     for {
-        t, buf, err := conn.ReadMessage()
+        streamName := m["streamName"]
+        // we now send json request to the subscribe url
+        var reqJson = ReqJson{StreamAccountId: m["streamAccountId"], StreamName: m["streamName"]}
+        bs, err := json.Marshal(&reqJson)
         if err != nil {
-            lerror(cid, "Failed to read message from websocket: ", err)
+            log.Fatal("Failed to marshal json data: ", err)
+        }
+        // sometimes, especially a bunch of connections are created, server may return
+        // error, so we'll try a few times with pause
+        var sub *SubscribeResp
+        req, err := http.NewRequest("POST", sub_url, bytes.NewBuffer(bs))
+        req.Header.Set("Content-Type", "application/json")
+        for _i := 0; _i<5; _i++ {
+            if _i > 0 {
+                time.Sleep(1 * time.Second)
+            }
+            resp, err := client.Do(req)
+            if err != nil {
+                log.Error("Failed to post request json to url: ", sub_url, ",  err: ", err)
+                continue
+            }
+
+            body, err := ioutil.ReadAll(resp.Body)
+            if err != nil {
+                log.Error("Failed to read data from response, err: ", err)
+                continue
+            }
+
+            var result map[string]interface{}
+            err = json.Unmarshal(body, &result)
+            if err != nil {
+                log.Error("Failed to unmarshal returned response json: ", body)
+                continue
+            }
+
+            sub = check_result(result)
+            if sub == nil {
+                log.Error("Server's response is not valid:", string(body))
+                continue
+            } else {
+                state.SubResp = sub
+            }
             break
         }
-        if t == websocket.TextMessage {
-            if !on_event(cfg, &state, buf) {
-                linfo(cid, "Connection task exit")
+        if sub == nil {
+            if !keep_trying(cid, &retry, "Failed to decode json returned from server") {
+                return
+            } else {
+                continue
+            }
+        }
+        wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
+
+        if err != nil {
+            if !keep_trying(cid, &retry, fmt.Sprintf("The wss url seems to be invalid: %v", err)) {
+                return
+            } else {
+                continue
+            }
+        }
+
+        // we now visit wss url
+        conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
+        if err != nil {
+            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to connect websocket url: %v", wss_url.String())) {
+                return
+            } else {
+                continue
+            }
+        }
+
+        // prepare json
+        _events := []string{"active", "inactive", "layers", "viewercount"}
+        var sdp_mp = map[string]interface{}{"sdp": req_sdp, "streamId": streamName, "events": _events}
+        var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
+        bs, err = json.Marshal(&cmd)
+        if err != nil {
+            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to marshal json data: %v", err)) {
+                return
+            } else {
+                continue
+            }
+        }
+
+        // Send view command
+        err = conn.WriteMessage(websocket.TextMessage, bs)
+        if err != nil {
+            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to send sdp via websocket connection: %v", err)) {
+                return
+            } else {
+                continue
+            }
+        }
+
+        state.conn_exit = make(chan struct{})
+
+        // Now wait for response and other events
+        for {
+            t, buf, err := conn.ReadMessage()
+            if err != nil {
+                lerror(cid, "Failed to read message from websocket: ", err)
+                close(state.conn_exit)
+                conn.Close()
+                linfo(cid, "Connection task exit due to websocket error")
                 break
             }
+            if t == websocket.TextMessage {
+                if !on_event(cfg, &state, buf) {
+                    close(state.conn_exit)
+                    conn.Close()
+                    linfo(cid, "Connection task exit")
+                    break
+                }
+            } else {
+                // we recieved binary
+                ldebug(cid, "Received binary data message")
+            }
+        }
+        if retry == 0 {
+            break
+        } else if retry < 0 {
+            // If retry is negative, it will retry forever
         } else {
-            // we recieved binary
-            ldebug(cid, "Received binary data message")
+            linfo(cid, "Connection is recreated!")
+            retry--
         }
     }
 }
