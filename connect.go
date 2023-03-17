@@ -69,6 +69,16 @@ type RunningState struct {
     conn_exit  chan struct{}
 }
 
+type ConnectStats struct {
+    UserName string              `json:"userName"`
+    HttpSubscribe float64        `json:"httpSubscribe"`
+    ICESetup float64             `json:"iceSetup"`
+    DTLSSetup float64            `json:"dtlsSetup"`
+    // SDPOffer float64             `json:"sdpOffer"`
+    // SDPAnswer float64            `json:"sdpAnswer"`
+    FirstFrame float64           `json:"firstFrame"`
+}
+
 func lerror(args ...interface{}) {
     left := args[1:]
     log.Error("(", args[0], ") ", left)
@@ -244,7 +254,7 @@ func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
 
 // This uses PeerConnection which has better encapsulation
 // it also dynmically generates answer SDP
-func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
+func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, info *AnswerSDPInfo) {
     if cfg.rate_limit_connecting != nil {
         defer func() {
             b := st.connecting.Load()
@@ -346,14 +356,31 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
     var ice_state webrtc.ICEConnectionState = webrtc.ICEConnectionStateNew
     var conn_state webrtc.PeerConnectionState = webrtc.PeerConnectionStateNew
 
+    iceStart := time.Now()
+    dtlsStart := iceStart
+    firstFrame := dtlsStart
+    iceConnected := false
+    dtlsConnected := false
+    firstFrameReceived := false
     pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
         ldebug(st.cid, "ice connection state changed to ", state)
         ice_state = state
+        if (!iceConnected && ice_state == webrtc.ICEConnectionStateConnected) {
+            iceConnected = true
+            cs.ICESetup = (float64(time.Since(iceStart)))/1000000.0
+            dtlsStart = time.Now()
+        }
     })
+
 
     pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
         ldebug(st.cid, "connection state switched to ", state)
         conn_state = state
+        if (!dtlsConnected && iceConnected && state == webrtc.PeerConnectionStateConnected) {
+            dtlsConnected = true;
+            cs.DTLSSetup = (float64(time.Since(dtlsStart)))/1000000.0
+            firstFrame = time.Now()
+        }
     })
 
     _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
@@ -373,6 +400,15 @@ func receive_streaming(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
                 if err != nil {
                     ldebug(st.cid, fmt.Sprintf("RTP read goroutine for %v: %v exit", tr.Kind().String(), tr.SSRC()))
                     break
+                }
+                if (!firstFrameReceived) {
+                    firstFrameReceived = true
+                    cs.FirstFrame = (float64(time.Since(firstFrame)))/1000000.0
+                    // we'll send the connect stats now
+                    bs, err := json.Marshal(cs)
+                    if err == nil {
+                        *cfg.stats_ch <- bs
+                    }
                 }
             }
         }()
@@ -599,7 +635,7 @@ func receive_streaming_direct(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo
     ldebug(st.cid, "Connection is working")
 }
 
-func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
+func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool {
     var ev map[string]interface{}
     err := json.Unmarshal(buf, &ev)
     if err != nil {
@@ -627,7 +663,7 @@ func on_event(cfg *AppCfg, st *RunningState, buf []byte) bool {
                     }
                 }
                 // go receive_streaming_direct(cfg, st, info)
-                go receive_streaming(cfg, st, info)
+                go receive_streaming(cfg, st, cs, info)
             }
         } else {
             if n, ok := ev["name"]; !ok {
@@ -751,6 +787,8 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
 
     for {
+        var cs ConnectStats
+        cs.UserName = state.LocalUser
         streamName := m["streamName"]
         // we now send json request to the subscribe url
         var reqJson = ReqJson{StreamAccountId: m["streamAccountId"], StreamName: m["streamName"]}
@@ -760,6 +798,7 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }
         // sometimes, especially a bunch of connections are created, server may return
         // error, so we'll try a few times with pause
+        now := time.Now()
         var sub *SubscribeResp
         req, err := http.NewRequest("POST", sub_url, bytes.NewBuffer(bs))
         req.Header.Set("Content-Type", "application/json")
@@ -812,6 +851,9 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             }
         }
 
+        // we've successfully got wss address, we know http subscribe time
+        cs.HttpSubscribe = (float64(time.Since(now)))/1000000.0
+
         // we now visit wss url
         conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
         if err != nil {
@@ -858,7 +900,7 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
                 break
             }
             if t == websocket.TextMessage {
-                if !on_event(cfg, &state, buf) {
+                if !on_event(cfg, &state, &cs, buf) {
                     close(state.conn_exit)
                     conn.Close()
                     linfo(cid, "Connection task exit")
