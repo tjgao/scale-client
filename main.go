@@ -32,6 +32,8 @@ type AppCfg struct {
     test_name *string
     // remote codec
     codec *string
+    // rtcbackup endpoint?
+    rtcbackup bool
 
 }
 
@@ -106,6 +108,7 @@ func main() {
     retry_times := flag.Int64("retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times, 
 default value is 0. If a negative value is provided, it retries forever`)
     stats_dst := flag.String("report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
+    is_rtcbackup := flag.Bool("rtcbackup", false, "If set, the program will use rtcbackup endpoint")
 
     flag.Parse()
     if level, ok := logLevelTable[*logLevel]; ok {
@@ -152,12 +155,13 @@ default value is 0. If a negative value is provided, it retries forever`)
     }
     cfg.wait_on_inactive = *wait_on_inactive
     cfg.pion_dbg = *pion_dbg
+    cfg.rtcbackup = *is_rtcbackup
 
     if *max_connecting > 0 {
         cfg.max_concurrent_connecting = *max_connecting
         // note: it's buffered channel, with fixed length "max_concurrent_connecting"
-        c := make(chan struct{}, cfg.max_concurrent_connecting)
-        cfg.rate_limit_connecting = &c
+        _c := make(chan struct{}, cfg.max_concurrent_connecting)
+        cfg.rate_limit_connecting = &_c
         for i := 0; i < int(cfg.max_concurrent_connecting); i++ {
             *cfg.rate_limit_connecting <- struct{}{}
         }

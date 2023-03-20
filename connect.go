@@ -66,7 +66,11 @@ type RunningState struct {
     SubResp    *SubscribeResp     // subscribe response
     connecting atomic.Bool
     local_sdp  string
-    conn_exit  chan struct{}
+    streamId   string
+    streamName  string
+    ws_exit  chan struct{}
+    rtp_exit   chan struct{}
+    rtcp_exit   chan struct{}
 }
 
 type ConnectStats struct {
@@ -95,7 +99,6 @@ func ldebug(args ...interface{}) {
     log.Debug("(", args[0], ") ", left)
 }
 
-const subscribe_url string = "https://director%v.millicast.com/api/director/subscribe"
 
 // parse the url to get stream account id and name
 func parse(url string) map[string]string {
@@ -255,7 +258,7 @@ func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
 
 // This uses PeerConnection which has better encapsulation
 // it also dynmically generates answer SDP
-func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, info *AnswerSDPInfo) {
+func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_sdp *string) {
     if cfg.rate_limit_connecting != nil {
         defer func() {
             b := st.connecting.Load()
@@ -413,6 +416,8 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, info *An
                     }
                 }
             }
+            close(st.rtp_exit)
+            pc.Close()
         }()
 
         go func() {
@@ -424,6 +429,8 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, info *An
                     break
                 }
             }
+            close(st.rtcp_exit)
+            pc.Close()
         }()
     })
 
@@ -436,7 +443,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, info *An
         panic(err)
     }
 
-    remote := webrtc.SessionDescription{SDP: info.orig_sdp, Type: webrtc.SDPTypeAnswer}
+    remote := webrtc.SessionDescription{SDP: *answer_sdp, Type: webrtc.SDPTypeAnswer}
     if err = pc.SetRemoteDescription(remote); err != nil {
         panic(err)
     }
@@ -445,9 +452,16 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, info *An
         last_stats := map[webrtc.SSRC]stats.InboundRTPStreamStats{}
         for {
             select {
-            case <-st.conn_exit:
+            case <-st.rtp_exit:
                 pc.Close()
-                ldebug(st.cid, "close peerconnection")
+                ldebug(st.cid, "close peerconnection, rtp_exit")
+                return
+            case <- st.rtcp_exit:
+                pc.Close()
+                ldebug(st.cid, "close peerconnection, rtcp_exit")
+            case <-st.ws_exit:
+                pc.Close()
+                ldebug(st.cid, "close peerconnection, ws_exit")
                 return
             case <-time.After(time.Second * time.Duration(stats_report_interval)):
                 ts := pc.GetTransceivers()
@@ -665,7 +679,7 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
                     }
                 }
                 // go receive_streaming_direct(cfg, st, info)
-                go receive_streaming(cfg, st, cs, info)
+                go receive_streaming(cfg, st, cs, &info.orig_sdp)
             }
         } else {
             if n, ok := ev["name"]; !ok {
@@ -719,8 +733,7 @@ func keep_trying(cid int, retry *int64, msg string) bool {
     return true
 }
 
-func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
-    defer wg.Done()
+func create_state(cid int, cfg *AppCfg) *RunningState {
     m := parse(*cfg.viewer_url)
     if _, ok := m["streamAccountId"]; !ok {
         log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
@@ -748,34 +761,16 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
     var state = RunningState{cid: cid, Cert: *cert, LocalUser: genRandomHash(16), LocalPwd: genRandomHash(48)}
 
-
+    state.streamId = m["streamAccountId"]
+    state.streamName = m["streamName"]
     req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
     state.local_sdp = req_sdp
 
-    // try to get the permissio to do connecting if needed
-    if cfg.rate_limit_connecting != nil {
-        <-*cfg.rate_limit_connecting
-        state.connecting.Store(true)
-        // The reason we do this is , it is possible it may not have the chance
-        // to call receive_rtp_streaming so we won't be able to notify the channel
-        // we've finished connecting
-        defer func() {
-            b := state.connecting.Load()
-            if b {
-                state.connecting.Store(false)
-                *cfg.rate_limit_connecting <- struct{}{}
-            }
-        }()
-    }
+    return &state
+}
 
-    client := &http.Client{}
-    // resp, err := client.Get(*cfg.viewer_url)
-    // if err != nil {
-    //     log.Fatal("Failed to access url: ", err)
-    // }
-    //
-    // resp.Body.Close()
 
+func get_domain_suffix(cfg *AppCfg) string {
     domain_splits :=  strings.Split(strings.Split(*cfg.viewer_url, ".")[0], "-")
     domain := ""
     if len(domain_splits) > 1 {
@@ -784,26 +779,28 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             domain += s
         }
     }
+    return domain
+}
 
-    sub_url := fmt.Sprintf(subscribe_url, domain)
 
-
-    for {
-        var cs ConnectStats
-        cs.UserID = state.LocalUser
-        cs.TestName = *cfg.test_name
-        streamName := m["streamName"]
+func sub_request(cid int, state *RunningState, retry *int64, sub_url string) (bool, *SubscribeResp) {
         // we now send json request to the subscribe url
-        var reqJson = ReqJson{StreamAccountId: m["streamAccountId"], StreamName: m["streamName"]}
+        var reqJson = ReqJson{StreamAccountId: state.streamId, StreamName: state.streamName}
         bs, err := json.Marshal(&reqJson)
         if err != nil {
             log.Fatal("Failed to marshal json data: ", err)
         }
-        // sometimes, especially a bunch of connections are created, server may return
-        // error, so we'll try a few times with pause
-        now := time.Now()
+
+        client := &http.Client{}
         var sub *SubscribeResp
         req, err := http.NewRequest("POST", sub_url, bytes.NewBuffer(bs))
+        if err != nil {
+            if !keep_trying(cid, retry, "") {
+                return false, nil
+            } else {
+                return true, nil
+            }
+        }
         req.Header.Set("Content-Type", "application/json")
         for _i := 0; _i<5; _i++ {
             if _i > 0 {
@@ -838,12 +835,153 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             break
         }
         if sub == nil {
-            if !keep_trying(cid, &retry, "Failed to decode json returned from server") {
+            if !keep_trying(cid, retry, "Failed to decode json returned from server") {
+                return false, nil
+            } else {
+                return true, nil
+            }
+        }
+        return true, sub
+}
+
+func rtcbackup_request(st *RunningState, sub *SubscribeResp, url string) *string {
+    // send rtcbackup post request with the token
+    req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(st.local_sdp)))
+    if err != nil {
+        lerror(st.cid, "Failed to create HTTP post object: ", err);
+        return nil
+    }
+    req.Header.Add("Authorization", "Bearer " + sub.Jwt)
+    req.Header.Set("Content-Type", "application/sdp")
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        linfo(st.cid, fmt.Sprintf("Failed to post offer sdp to %v, err: %v", url, err))
+        return nil
+    }
+    body, err := ioutil.ReadAll(resp.Body)
+    answer := string(body)
+    return &answer
+}
+
+func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
+    if cfg.rtcbackup {
+        go connect_rtcbackup(wg, cid, cfg, retry)
+    } else {
+        go connect_ws(wg, cid, cfg, retry)
+    }
+}
+
+func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
+    defer wg.Done()
+    state := create_state(cid, cfg)
+
+    // // try to get the permissio to do connecting if needed
+    // if cfg.rate_limit_connecting != nil {
+    //     <-*cfg.rate_limit_connecting
+    //     state.connecting.Store(true)
+    //     // The reason we do this is , it is possible it may not have the chance
+    //     // to call receive_rtp_streaming so we won't be able to notify the channel
+    //     // we've finished connecting
+    //     defer func() {
+    //         b := state.connecting.Load()
+    //         if b {
+    //             state.connecting.Store(false)
+    //             *cfg.rate_limit_connecting <- struct{}{}
+    //         }
+    //     }()
+    // }
+    //
+
+    const subscribe_url_tpl string = "https://director%v.millicast.com/api/director/subscribe"
+    sub_url := fmt.Sprintf(subscribe_url_tpl, get_domain_suffix(cfg))
+
+    const rtcbackup_url_tpl string = "https://director%v.millicast.com/api/rtcbackup/sub/%v/%v"
+    rtc_url := fmt.Sprintf(rtcbackup_url_tpl, get_domain_suffix(cfg), state.streamId, state.streamName)
+
+    for {
+        var cs ConnectStats
+        cs.UserID = state.LocalUser
+        cs.TestName = *cfg.test_name
+        // we still need the token
+
+        now := time.Now()
+        ok, sub := sub_request(cid, state, &retry, sub_url)
+        if !ok {
+            break
+        } else if sub == nil {
+            continue
+        }
+        cs.HttpSubscribe = (float64(time.Since(now)))/1000000.0
+        answer := rtcbackup_request(state, sub, rtc_url)
+        if answer == nil {
+            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to POST offer sdp")) {
                 return
             } else {
                 continue
             }
         }
+
+        state.rtp_exit = make(chan struct{})
+        state.rtcp_exit = make(chan struct{})
+
+        select {
+        case <- state.rtp_exit:
+            break
+        case <- state.rtcp_exit:
+            break
+        }
+
+        if retry == 0 {
+            break
+        } else if retry < 0 {
+            // If retry is negative, it will retry forever
+        } else {
+            linfo(cid, "Connection is recreated!")
+            retry--
+        }
+    }
+}
+
+
+
+func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
+    defer wg.Done()
+
+    state := create_state(cid, cfg)
+
+    // try to get the permissio to do connecting if needed
+    if cfg.rate_limit_connecting != nil {
+        <-*cfg.rate_limit_connecting
+        state.connecting.Store(true)
+        // The reason we do this is , it is possible it may not have the chance
+        // to call receive_rtp_streaming so we won't be able to notify the channel
+        // we've finished connecting
+        defer func() {
+            b := state.connecting.Load()
+            if b {
+                state.connecting.Store(false)
+                *cfg.rate_limit_connecting <- struct{}{}
+            }
+        }()
+    }
+
+    const subscribe_url_tpl string = "https://director%v.millicast.com/api/director/subscribe"
+    sub_url := fmt.Sprintf(subscribe_url_tpl, get_domain_suffix(cfg))
+
+
+    for {
+        var cs ConnectStats
+        cs.UserID = state.LocalUser
+        cs.TestName = *cfg.test_name
+        now := time.Now()
+        ok, sub := sub_request(cid, state, &retry, sub_url)
+        if !ok {
+            break
+        } else if sub == nil {
+            continue
+        }
+
         wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
 
         if err != nil {
@@ -869,9 +1007,9 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         // prepare json
         _events := []string{"active", "inactive", "layers", "viewercount"}
-        var sdp_mp = map[string]interface{}{"sdp": req_sdp, "streamId": streamName, "events": _events}
+        var sdp_mp = map[string]interface{}{"sdp": state.local_sdp, "streamId": state.streamName, "events": _events}
         var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
-        bs, err = json.Marshal(&cmd)
+        bs, err := json.Marshal(&cmd)
         if err != nil {
             if !keep_trying(cid, &retry, fmt.Sprintf("Failed to marshal json data: %v", err)) {
                 return
@@ -890,30 +1028,45 @@ func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             }
         }
 
-        state.conn_exit = make(chan struct{})
+        state.ws_exit = make(chan struct{})
+        state.rtp_exit = make(chan struct{})
+        state.rtcp_exit = make(chan struct{})
+        loop_ch := make(chan struct{})
 
-        // Now wait for response and other events
-        for {
-            t, buf, err := conn.ReadMessage()
-            if err != nil {
-                lerror(cid, "Failed to read message from websocket: ", err)
-                close(state.conn_exit)
-                conn.Close()
-                linfo(cid, "Connection task exit due to websocket error")
-                break
-            }
-            if t == websocket.TextMessage {
-                if !on_event(cfg, &state, &cs, buf) {
-                    close(state.conn_exit)
+        go func() {
+            for {
+                t, buf, err := conn.ReadMessage()
+                if err != nil {
+                    lerror(cid, "Failed to read message from websocket: ", err)
+                    close(state.ws_exit)
                     conn.Close()
-                    linfo(cid, "Connection task exit")
+                    linfo(cid, "Connection task exit due to websocket error")
                     break
                 }
-            } else {
-                // we recieved binary
-                ldebug(cid, "Received binary data message")
+                if t == websocket.TextMessage {
+                    if !on_event(cfg, state, &cs, buf) {
+                        close(state.ws_exit)
+                        conn.Close()
+                        linfo(cid, "Connection task exit")
+                        break
+                    }
+                } else {
+                    // we recieved binary
+                    ldebug(cid, "Received binary data message")
+                }
             }
+            close(loop_ch)
+        }()
+
+        select {
+        case <- loop_ch:
+            close(state.ws_exit)
+        case <- state.rtp_exit:
+            close(state.ws_exit)
+        case <- state.rtcp_exit:
+            close(state.ws_exit)
         }
+
         if retry == 0 {
             break
         } else if retry < 0 {
