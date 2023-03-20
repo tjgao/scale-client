@@ -416,7 +416,6 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                     }
                 }
             }
-            close(st.rtp_exit)
             pc.Close()
         }()
 
@@ -429,7 +428,6 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                     break
                 }
             }
-            close(st.rtcp_exit)
             pc.Close()
         }()
     })
@@ -1038,14 +1036,12 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
                 t, buf, err := conn.ReadMessage()
                 if err != nil {
                     lerror(cid, "Failed to read message from websocket: ", err)
-                    close(state.ws_exit)
                     conn.Close()
                     linfo(cid, "Connection task exit due to websocket error")
                     break
                 }
                 if t == websocket.TextMessage {
                     if !on_event(cfg, state, &cs, buf) {
-                        close(state.ws_exit)
                         conn.Close()
                         linfo(cid, "Connection task exit")
                         break
