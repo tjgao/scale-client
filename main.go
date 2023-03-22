@@ -292,19 +292,18 @@ default value is 0. If a negative value is provided, it retries forever`)
     cfg.rtcbackup_cfg.ptoken_id = *ptkid
     if cfg.rtcbackup {
         if *cfg.rtcbackup_cfg.stoken == "" || cfg.rtcbackup_cfg.stoken_id == 0 || *cfg.rtcbackup_cfg.ptoken == "" || cfg.rtcbackup_cfg.ptoken_id == 0 {
-            log.Fatal("Must specify pub/sub token and token id")
+            log.Fatal("Must specify pub/sub token and token id for rtcbackup mode")
         }
         // we calculate appId and appKey here as this only needs to be done once
-        // but later we'll use them to generate jwt token for each connection as that has a timing effect
+        // but later we'll use them to generate jwt token for each connection as that has a timing effect (expire in some time)
         cfg.rtcbackup_cfg.appId = generate_appid(cfg.streamAccountId, cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id)
         cfg.rtcbackup_cfg.appKey = generate_appkey(cfg.rtcbackup_cfg.ptoken, cfg.rtcbackup_cfg.stoken)
 
-        // we should have enough information to figure out the whep url, it is printed out for convenience
-        // ${directorDomain}/api/whep/${streamAccountId}/${generateRtcBackupStreamName(publishTokenId, subscribeTokenId, streamName)
+        // we should have enough information to figure out the view url, it is printed out for convenience
         check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v&token=%v"
         special_rtcbackup_name := generate_rtcbackup_name(cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id, &cfg.streamName)
         check_url := fmt.Sprintf(check_url_tpl, get_domain_suffix(cfg.viewer_url), cfg.streamAccountId, special_rtcbackup_name, *cfg.rtcbackup_cfg.stoken);
-        fmt.Println(check_url)
+        fmt.Println("View URL:\n", check_url)
     }
 
     if *max_connecting > 0 {

@@ -403,6 +403,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                 }
             }
             pc.Close()
+            close(st.rtp_exit)
         }()
 
         go func() {
@@ -415,6 +416,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                 }
             }
             pc.Close()
+            close(st.rtcp_exit)
         }()
     })
 
