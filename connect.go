@@ -2,6 +2,7 @@ package main
 
 import (
     "bytes"
+    b64 "encoding/base64"
     "context"
     "crypto/ecdsa"
     "crypto/elliptic"
@@ -18,7 +19,6 @@ import (
     "errors"
     "net/http"
     "net/url"
-    "regexp"
     "strings"
     "time"
 
@@ -66,8 +66,6 @@ type RunningState struct {
     SubResp    *SubscribeResp     // subscribe response
     connecting atomic.Bool
     local_sdp  string
-    streamId   string
-    streamName  string
     ws_exit  chan struct{}
     rtp_exit   chan struct{}
     rtcp_exit   chan struct{}
@@ -99,18 +97,6 @@ func ldebug(args ...interface{}) {
     log.Debug("(", args[0], ") ", left)
 }
 
-
-// parse the url to get stream account id and name
-func parse(url string) map[string]string {
-    re := regexp.MustCompile("http.+streamId=(?P<streamAccountId>[0-9a-zA-Z]+)/(?P<streamName>[0-9a-zA-Z]+)")
-    r := re.FindAllStringSubmatch(url, -1)[0]
-    keys := re.SubexpNames()
-    md := map[string]string{}
-    for i, n := range r {
-        md[keys[i]] = n
-    }
-    return md
-}
 
 func addIceServer(o interface{}, sub *SubscribeResp) {
     var ice webrtc.ICEServer
@@ -732,14 +718,6 @@ func keep_trying(cid int, retry *int64, msg string) bool {
 }
 
 func create_state(cid int, cfg *AppCfg) *RunningState {
-    m := parse(*cfg.viewer_url)
-    if _, ok := m["streamAccountId"]; !ok {
-        log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
-    }
-    if _, ok := m["streamName"]; !ok {
-        log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
-    }
-
     // Generate a random privateKey
     priv, err := ecdsa.GenerateKey(elliptic.P256(), rd.Reader)
     if err != nil {
@@ -759,8 +737,6 @@ func create_state(cid int, cfg *AppCfg) *RunningState {
 
     var state = RunningState{cid: cid, Cert: *cert, LocalUser: genRandomHash(16), LocalPwd: genRandomHash(48)}
 
-    state.streamId = m["streamAccountId"]
-    state.streamName = m["streamName"]
     req_sdp := createReqSDP(state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
     state.local_sdp = req_sdp
 
@@ -768,22 +744,9 @@ func create_state(cid int, cfg *AppCfg) *RunningState {
 }
 
 
-func get_domain_suffix(cfg *AppCfg) string {
-    domain_splits :=  strings.Split(strings.Split(*cfg.viewer_url, ".")[0], "-")
-    domain := ""
-    if len(domain_splits) > 1 {
-        for _, s := range domain_splits[1:] {
-            domain += "-"
-            domain += s
-        }
-    }
-    return domain
-}
-
-
-func sub_request(cid int, state *RunningState, retry *int64, sub_url string) (bool, *SubscribeResp) {
+func sub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, sub_url string) (bool, *SubscribeResp) {
         // we now send json request to the subscribe url
-        var reqJson = ReqJson{StreamAccountId: state.streamId, StreamName: state.streamName}
+        var reqJson = ReqJson{StreamAccountId: cfg.streamAccountId, StreamName: cfg.streamName}
         bs, err := json.Marshal(&reqJson)
         if err != nil {
             log.Fatal("Failed to marshal json data: ", err)
@@ -842,14 +805,24 @@ func sub_request(cid int, state *RunningState, retry *int64, sub_url string) (bo
         return true, sub
 }
 
-func rtcbackup_request(st *RunningState, sub *SubscribeResp, url string) *string {
+func generate_jwt_token(payload string, appKey string) string {
+    const h string = "{\"type\":\"JWT\",\"alg\":\"HS256\"}"
+    header := url_friendly(strings.TrimRight(b64.StdEncoding.EncodeToString([]byte(h)), "="))
+    encoded_payload := url_friendly(strings.TrimRight(b64.StdEncoding.EncodeToString([]byte(payload)), "="))
+    jwt := header + "." + encoded_payload
+    signature := url_friendly(strings.TrimRight(hmac_sha256(jwt, appKey), "="))
+    return jwt + "." + signature
+}
+
+
+func rtcbackup_request(st *RunningState, url string, token *string) *string {
     // send rtcbackup post request with the token
     req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(st.local_sdp)))
     if err != nil {
         lerror(st.cid, "Failed to create HTTP post object: ", err);
         return nil
     }
-    req.Header.Add("Authorization", "Bearer " + sub.Jwt)
+    req.Header.Add("Authorization", "Bearer " + *token)
     req.Header.Set("Content-Type", "application/sdp")
     client := &http.Client{}
     resp, err := client.Do(req)
@@ -859,6 +832,10 @@ func rtcbackup_request(st *RunningState, sub *SubscribeResp, url string) *string
     }
     body, err := ioutil.ReadAll(resp.Body)
     answer := string(body)
+    if resp.StatusCode != 201 {
+        linfo(st.cid, "Server returned status code:", resp.StatusCode, ", error: ", answer)
+        return nil
+    }
     return &answer
 }
 
@@ -874,44 +851,31 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
     defer wg.Done()
     state := create_state(cid, cfg)
 
-    // // try to get the permissio to do connecting if needed
-    // if cfg.rate_limit_connecting != nil {
-    //     <-*cfg.rate_limit_connecting
-    //     state.connecting.Store(true)
-    //     // The reason we do this is , it is possible it may not have the chance
-    //     // to call receive_rtp_streaming so we won't be able to notify the channel
-    //     // we've finished connecting
-    //     defer func() {
-    //         b := state.connecting.Load()
-    //         if b {
-    //             state.connecting.Store(false)
-    //             *cfg.rate_limit_connecting <- struct{}{}
-    //         }
-    //     }()
-    // }
-    //
-
-    const subscribe_url_tpl string = "https://director%v.millicast.com/api/director/subscribe"
-    sub_url := fmt.Sprintf(subscribe_url_tpl, get_domain_suffix(cfg))
+    // try to get the permissio to do connecting if needed
+    if cfg.rate_limit_connecting != nil {
+        <-*cfg.rate_limit_connecting
+        state.connecting.Store(true)
+        defer func() {
+            b := state.connecting.Load()
+            if b {
+                state.connecting.Store(false)
+                *cfg.rate_limit_connecting <- struct{}{}
+            }
+        }()
+    }
 
     const rtcbackup_url_tpl string = "https://director%v.millicast.com/api/rtcbackup/sub/%v/%v"
-    rtc_url := fmt.Sprintf(rtcbackup_url_tpl, get_domain_suffix(cfg), state.streamId, state.streamName)
+    rtc_url := fmt.Sprintf(rtcbackup_url_tpl, get_domain_suffix(cfg.viewer_url), cfg.rtcbackup_cfg.appId, cfg.streamName)
 
     for {
         var cs ConnectStats
         cs.UserID = state.LocalUser
         cs.TestName = *cfg.test_name
-        // we still need the token
+
+        token := generate_jwt_token(generate_rtcbackup_payload(cfg.rtcbackup_cfg.appId, cfg.streamName), cfg.rtcbackup_cfg.appKey)
 
         now := time.Now()
-        ok, sub := sub_request(cid, state, &retry, sub_url)
-        if !ok {
-            break
-        } else if sub == nil {
-            continue
-        }
-        cs.HttpSubscribe = (float64(time.Since(now)))/1000000.0
-        answer := rtcbackup_request(state, sub, rtc_url)
+        answer := rtcbackup_request(state, rtc_url, &token)
         if answer == nil {
             if !keep_trying(cid, &retry, fmt.Sprintf("Failed to POST offer sdp")) {
                 return
@@ -919,9 +883,13 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
                 continue
             }
         }
+        cs.HttpSubscribe = (float64(time.Since(now)))/1000000.0
 
         state.rtp_exit = make(chan struct{})
         state.rtcp_exit = make(chan struct{})
+        state.ws_exit = make(chan struct{})
+
+        go receive_streaming(cfg, state, &cs, answer)
 
         select {
         case <- state.rtp_exit:
@@ -930,6 +898,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             break
         }
 
+        close(state.ws_exit)
         if retry == 0 {
             break
         } else if retry < 0 {
@@ -965,7 +934,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
     }
 
     const subscribe_url_tpl string = "https://director%v.millicast.com/api/director/subscribe"
-    sub_url := fmt.Sprintf(subscribe_url_tpl, get_domain_suffix(cfg))
+    sub_url := fmt.Sprintf(subscribe_url_tpl, get_domain_suffix(cfg.viewer_url))
 
 
     for {
@@ -973,7 +942,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         cs.UserID = state.LocalUser
         cs.TestName = *cfg.test_name
         now := time.Now()
-        ok, sub := sub_request(cid, state, &retry, sub_url)
+        ok, sub := sub_request(cid, state, cfg, &retry, sub_url)
         if !ok {
             break
         } else if sub == nil {
@@ -1005,7 +974,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         // prepare json
         _events := []string{"active", "inactive", "layers", "viewercount"}
-        var sdp_mp = map[string]interface{}{"sdp": state.local_sdp, "streamId": state.streamName, "events": _events}
+        var sdp_mp = map[string]interface{}{"sdp": state.local_sdp, "streamId": cfg.streamName, "events": _events}
         var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
         bs, err := json.Marshal(&cmd)
         if err != nil {

@@ -2,16 +2,48 @@ package main
 
 import (
     "bytes"
+    b64 "encoding/base64"
+    "encoding/binary"
     "flag"
+    "fmt"
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/json"
     "math/rand"
     "net/http"
     "os"
+    "regexp"
     "strings"
     "sync"
     "time"
 
     log "github.com/sirupsen/logrus"
 )
+
+type rtcbackup_payload struct {
+    Version string     `json:"version"`
+    AppId string       `json:"appId"`
+    StreamId string    `json:"streamId"`
+    Action string      `json:"action"`
+    EnableSubAuth bool `json:"enableSubAuth"`
+    Exp float64        `json:"exp"`
+}
+
+
+type RtcBackupCfg struct {
+    // sub token id
+    stoken_id uint64
+    // pub token id
+    ptoken_id uint64
+    // sub token
+    stoken *string
+    // pub token
+    ptoken *string
+    // appId
+    appId string
+    // appKey
+    appKey string
+}
 
 type AppCfg struct {
     // the url for viewers
@@ -26,15 +58,20 @@ type AppCfg struct {
     rate_limit_connecting *chan struct{}
     // stats channel
     stats_ch *chan []byte
-    // flag for turn on pion dbg 
+    // flag for turn on pion dbg
     pion_dbg bool
     // test name
     test_name *string
     // remote codec
     codec *string
+    // stream account id
+    streamAccountId string
+    // stream name
+    streamName string
     // rtcbackup endpoint?
     rtcbackup bool
-
+    // rtcbackup cfg
+    rtcbackup_cfg RtcBackupCfg
 }
 
 type send_stats_func func([]byte, string)
@@ -84,6 +121,87 @@ func notify_send_stats(st chan []byte, dst string) {
     }
 }
 
+func get_domain_suffix(viewer_url *string) string {
+    domain_splits :=  strings.Split(strings.Split(*viewer_url, ".")[0], "-")
+    domain := ""
+    if len(domain_splits) > 1 {
+        for _, s := range domain_splits[1:] {
+            domain += "-"
+            domain += s
+        }
+    }
+    return domain
+}
+
+
+// parse the url to get stream account id and name
+func parse(url *string) map[string]string {
+    re := regexp.MustCompile("http.+streamId=(?P<streamAccountId>[0-9a-zA-Z_-]+)/(?P<streamName>[0-9a-zA-Z_-]+)")
+    r := re.FindAllStringSubmatch(*url, -1)[0]
+    keys := re.SubexpNames()
+    md := map[string]string{}
+    for i, n := range r {
+        md[keys[i]] = n
+    }
+    return md
+}
+
+func uint64_bytes(n uint64) string {
+    bs := make([]byte, 8)
+    binary.BigEndian.PutUint64(bs, n)
+    skipped := false
+    var buf bytes.Buffer
+    for _, b := range bs {
+        // skip leading 0s
+        if b == 0 && !skipped {
+            continue
+        } else {
+            skipped = true
+        }
+        buf.WriteByte(b)
+    }
+    return strings.TrimRight(b64.StdEncoding.EncodeToString(buf.Bytes()), "=")
+}
+
+
+func generate_appid(streamId string, ptoken_id uint64, stoken_id uint64) string {
+    return streamId + "." + uint64_bytes(ptoken_id) + "." + uint64_bytes(stoken_id)
+}
+
+func generate_rtcbackup_name(ptoken_id uint64, stoken_id uint64, streamName *string) string {
+    return uint64_bytes(ptoken_id) + "." + uint64_bytes(stoken_id) + "." + *streamName
+}
+
+func generate_appkey(ptoken *string, stoken *string) string {
+    bs := sha256.Sum256([]byte(*ptoken + *stoken))
+    var buf bytes.Buffer
+    for _, b := range bs {
+        buf.WriteString(fmt.Sprintf("%02x", b))
+    }
+    return buf.String()
+}
+
+func url_friendly(b string) string {
+    return strings.ReplaceAll(strings.ReplaceAll(b, "+", "-"), "/", "_")
+}
+
+func hmac_sha256(body string, secret string) string {
+    h := hmac.New(sha256.New, []byte(secret))
+    h.Write([]byte(body))
+    bs := h.Sum(nil)
+    return b64.StdEncoding.EncodeToString(bs)
+}
+
+func generate_rtcbackup_payload(appId string, streamName string) string {
+    exp := float64(time.Now().UnixMilli())/1000.0 + 60
+    p := rtcbackup_payload{Version: "1.0", AppId: appId, StreamId: streamName, Action: "sub", EnableSubAuth: false, Exp: exp}
+    bs, err := json.Marshal(&p)
+    if err != nil {
+        log.Fatal("Failed to create json: ", err);
+    }
+    return string(bs)
+}
+
 func main() {
     logLevelTable := map[string]log.Level{
         "panic": log.PanicLevel,
@@ -105,10 +223,14 @@ func main() {
     max_connecting := flag.Uint64("max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0. It will disable connecting_time if set")
     _stats_report_inteval := flag.Int64("report_interval", 10, "The stats report interval")
     cfg.viewer_url = flag.String("url", "", "URL to access")
-    retry_times := flag.Int64("retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times, 
+    retry_times := flag.Int64("retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times,
 default value is 0. If a negative value is provided, it retries forever`)
     stats_dst := flag.String("report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
     is_rtcbackup := flag.Bool("rtcbackup", false, "If set, the program will use rtcbackup endpoint")
+    stkid := flag.Uint64("stoken_id", 0, "Specify the subscribe token id, only used for rtcbackup endpoint")
+    ptkid := flag.Uint64("ptoken_id", 0, "Specify the publish token id, only used for rtcbackup endpoint")
+    cfg.rtcbackup_cfg.stoken = flag.String("stoken", "", "Specify the subscribe token, only used for rtcbackup endpoint")
+    cfg.rtcbackup_cfg.ptoken = flag.String("ptoken", "", "Specify the publish token, only used for rtcbackup endpoint")
 
     flag.Parse()
     if level, ok := logLevelTable[*logLevel]; ok {
@@ -120,6 +242,16 @@ default value is 0. If a negative value is provided, it retries forever`)
     if *cfg.viewer_url == "" {
         log.Fatal("URL is not specified, exit")
     }
+    // we extract account id and stream name from the url
+    m := parse(*&cfg.viewer_url)
+    if _, ok := m["streamAccountId"]; !ok {
+        log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
+    }
+    if _, ok := m["streamName"]; !ok {
+        log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
+    }
+    cfg.streamAccountId = m["streamAccountId"]
+    cfg.streamName = m["streamName"]
 
     if *num <= 0 {
         log.Fatal("Specify a positive number for connections!")
@@ -156,6 +288,24 @@ default value is 0. If a negative value is provided, it retries forever`)
     cfg.wait_on_inactive = *wait_on_inactive
     cfg.pion_dbg = *pion_dbg
     cfg.rtcbackup = *is_rtcbackup
+    cfg.rtcbackup_cfg.stoken_id = *stkid
+    cfg.rtcbackup_cfg.ptoken_id = *ptkid
+    if cfg.rtcbackup {
+        if *cfg.rtcbackup_cfg.stoken == "" || cfg.rtcbackup_cfg.stoken_id == 0 || *cfg.rtcbackup_cfg.ptoken == "" || cfg.rtcbackup_cfg.ptoken_id == 0 {
+            log.Fatal("Must specify pub/sub token and token id")
+        }
+        // we calculate appId and appKey here as this only needs to be done once
+        // but later we'll use them to generate jwt token for each connection as that has a timing effect
+        cfg.rtcbackup_cfg.appId = generate_appid(cfg.streamAccountId, cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id)
+        cfg.rtcbackup_cfg.appKey = generate_appkey(cfg.rtcbackup_cfg.ptoken, cfg.rtcbackup_cfg.stoken)
+
+        // we should have enough information to figure out the whep url, it is printed out for convenience
+        // ${directorDomain}/api/whep/${streamAccountId}/${generateRtcBackupStreamName(publishTokenId, subscribeTokenId, streamName)
+        check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v&token=%v"
+        special_rtcbackup_name := generate_rtcbackup_name(cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id, &cfg.streamName)
+        check_url := fmt.Sprintf(check_url_tpl, get_domain_suffix(cfg.viewer_url), cfg.streamAccountId, special_rtcbackup_name, *cfg.rtcbackup_cfg.stoken);
+        fmt.Println(check_url)
+    }
 
     if *max_connecting > 0 {
         cfg.max_concurrent_connecting = *max_connecting
