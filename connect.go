@@ -66,9 +66,8 @@ type RunningState struct {
     SubResp    *SubscribeResp     // subscribe response
     connecting atomic.Bool
     local_sdp  string
-    ws_exit  *chan struct{}
-    rtp_exit   *chan struct{}
-    rtcp_exit   *chan struct{}
+    conn_exit  chan struct{}
+    close_conn func()
 }
 
 type ConnectStats struct {
@@ -358,6 +357,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
         if ice_state == webrtc.ICEConnectionStateFailed {
             lerror(st.cid, "ice connection failed, close peerconnection")
             pc.Close()
+            st.close_conn()
         }
         if (!iceConnected && ice_state == webrtc.ICEConnectionStateConnected) {
             iceConnected = true
@@ -373,6 +373,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
         if conn_state == webrtc.PeerConnectionStateFailed {
             lerror(st.cid, "connection failed, close peerconnection")
             pc.Close()
+            st.close_conn()
         }
         if (!dtlsConnected && iceConnected && state == webrtc.PeerConnectionStateConnected) {
             dtlsConnected = true;
@@ -391,8 +392,6 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
     }
 
     pc.OnTrack(func(tr *webrtc.TrackRemote, rc *webrtc.RTPReceiver) {
-        rtp_ch := st.rtp_exit
-        rtcp_ch := st.rtcp_exit
         go func() {
             rtp_buf := make([]byte, MAX_RTP_LEN)
             for {
@@ -413,7 +412,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                 }
             }
             pc.Close()
-            close(*rtp_ch)
+            st.close_conn()
         }()
 
         go func() {
@@ -426,7 +425,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                 }
             }
             pc.Close()
-            close(*rtcp_ch)
+            st.close_conn()
         }()
     })
 
@@ -445,22 +444,12 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
     }
 
     go func() {
-        rtp_ch := st.rtp_exit
-        rtcp_ch := st.rtcp_exit
-        ws_ch := st.ws_exit
         last_stats := map[webrtc.SSRC]stats.InboundRTPStreamStats{}
         for {
             select {
-            case <-*rtp_ch:
+            case <- st.conn_exit:
                 pc.Close()
-                ldebug(st.cid, "close peerconnection, rtp_exit")
-                return
-            case <- *rtcp_ch:
-                pc.Close()
-                ldebug(st.cid, "close peerconnection, rtcp_exit")
-            case <- *ws_ch:
-                pc.Close()
-                ldebug(st.cid, "close peerconnection, ws_exit")
+                ldebug(st.cid, "stats report goroutine exit, notified by conn_exit")
                 return
             case <-time.After(time.Second * time.Duration(stats_report_interval)):
                 ts := pc.GetTransceivers()
@@ -902,23 +891,19 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         cs.HttpSubscribe = (float64(time.Since(now)))/1000000.0
 
 
-        _ws_exit := make(chan struct{})
-        _rtp_exit := make(chan struct{})
-        _rtcp_exit := make(chan struct{})
-        state.ws_exit = &_ws_exit
-        state.rtp_exit = &_rtp_exit
-        state.rtcp_exit = &_rtcp_exit
+        state.conn_exit = make(chan struct{})
+        var cc sync.Once
+        state.close_conn = func() {
+            cc.Do(func(){
+                close(state.conn_exit)
+            })
+        }
 
         go receive_streaming(cfg, state, &cs, answer)
 
-        select {
-        case <- _rtp_exit:
-            break
-        case <- _rtcp_exit:
-            break
-        }
+        <-state.conn_exit
 
-        close(_ws_exit)
+        ldebug(cid, "Connection is completely closed")
         if retry == 0 {
             break
         } else if retry < 0 {
@@ -1015,13 +1000,14 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             }
         }
 
-        _ws_exit := make(chan struct{})
-        _rtp_exit := make(chan struct{})
-        _rtcp_exit := make(chan struct{})
-        state.ws_exit = &_ws_exit
-        state.rtp_exit = &_rtp_exit
-        state.rtcp_exit = &_rtcp_exit
-        loop_ch := make(chan struct{})
+
+        state.conn_exit = make(chan struct{})
+        var cc sync.Once
+        state.close_conn = func() {
+            cc.Do(func(){
+                close(state.conn_exit)
+            })
+        }
 
         go func() {
             for {
@@ -1043,18 +1029,12 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
                     ldebug(cid, "Received binary data message")
                 }
             }
-            close(loop_ch)
+            state.close_conn()
         }()
 
-        select {
-        case <- loop_ch:
-            break
-        case <- _rtp_exit:
-            break
-        case <- _rtcp_exit:
-            break
-        }
-        close(_ws_exit)
+        <-state.conn_exit
+
+        ldebug(cid, "Connection is completely closed")
 
         if retry == 0 {
             break
