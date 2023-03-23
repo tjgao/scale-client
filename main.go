@@ -249,7 +249,7 @@ func main() {
     func() {
         for _, fs := range []*flag.FlagSet{ws, rtcbackup} {
             fs.StringVar(&test_name, "name", "", "Name of the test")
-            fs.StringVar(&codec, "codec", "", "Codec used by remote side. Valid options are h264, vp8 and vp9, default is h264")
+            fs.StringVar(&codec, "codec", "h264", "Codec used by remote side. Valid options are h264, vp8 and vp9, default is h264")
             fs.IntVar(&num, "num", 1, "Number of connections")
             fs.StringVar(&logLevel, "level", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
             fs.StringVar(&logfile, "logfile", "", "Log file path, log output goes to log file instead of console")
@@ -368,10 +368,6 @@ func main() {
         stats_dst = cur.Format("2006-01-02_15:04:05.stats.txt")
     } else if strings.HasPrefix(stats_dst, "http://") || strings.HasPrefix(stats_dst, "https://") {
         send_stats = send_stats_post
-    }
-
-    if *cfg.codec == "" {
-        *cfg.codec = "h264"
     }
 
     if report_interval < 0 {
