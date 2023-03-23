@@ -383,6 +383,8 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
     }
 
     pc.OnTrack(func(tr *webrtc.TrackRemote, rc *webrtc.RTPReceiver) {
+        rtp_ch := st.rtp_exit
+        rtcp_ch := st.rtcp_exit
         go func() {
             rtp_buf := make([]byte, MAX_RTP_LEN)
             for {
@@ -403,7 +405,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                 }
             }
             pc.Close()
-            close(st.rtp_exit)
+            close(rtp_ch)
         }()
 
         go func() {
@@ -416,7 +418,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                 }
             }
             pc.Close()
-            close(st.rtcp_exit)
+            close(rtcp_ch)
         }()
     })
 
@@ -867,7 +869,8 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
     }
 
     const rtcbackup_url_tpl string = "https://director%v.millicast.com/api/rtcbackup/sub/%v/%v"
-    rtc_url := fmt.Sprintf(rtcbackup_url_tpl, get_domain_suffix(cfg.viewer_url), cfg.rtcbackup_cfg.appId, cfg.streamName)
+
+    rtc_url := fmt.Sprintf(rtcbackup_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName)
 
     for {
         var cs ConnectStats

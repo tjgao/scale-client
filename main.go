@@ -39,6 +39,8 @@ type RtcBackupCfg struct {
     stoken *string
     // pub token
     ptoken *string
+    // platform
+    platform *string
     // appId
     appId string
     // appKey
@@ -136,7 +138,7 @@ func get_domain_suffix(viewer_url *string) string {
 
 // parse the url to get stream account id and name
 func parse(url *string) map[string]string {
-    re := regexp.MustCompile("http.+streamId=(?P<streamAccountId>[0-9a-zA-Z_-]+)/(?P<streamName>[0-9a-zA-Z_-]+)")
+    re := regexp.MustCompile("http.+streamId=(?P<streamAccountId>[0-9a-zA-Z_.-]+)/(?P<streamName>[0-9a-zA-Z_.-]+)")
     r := re.FindAllStringSubmatch(*url, -1)[0]
     keys := re.SubexpNames()
     md := map[string]string{}
@@ -203,6 +205,11 @@ func generate_rtcbackup_payload(appId string, streamName string) string {
 }
 
 func main() {
+    if len(os.Args) < 2 {
+        log.Info("Available subcommands: ws, rb. Please check the help: <program> <subcommand> -h")
+        os.Exit(0)
+    }
+
     logLevelTable := map[string]log.Level{
         "panic": log.PanicLevel,
         "error": log.ErrorLevel,
@@ -211,54 +218,141 @@ func main() {
         "debug": log.DebugLevel,
     }
 
-    var cfg AppCfg
-    cfg.test_name = flag.String("name", "", "Name of the test")
-    cfg.codec = flag.String("codec", "", "Codec used by remote side. Valid options are h264, vp8 and vp9, default is h264")
-    num := flag.Int("num", 1, "Number of connections")
-    logLevel := flag.String("level", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
-    logfile := flag.String("logfile", "", "Log file path, log output goes to log file instead of console")
-    pion_dbg := flag.Bool("dbg", false, "Turn on pion debug so that more internal info will be printed out")
-    wait_on_inactive := flag.Bool("wait_on_inactive", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit")
-    connecting_time := flag.Uint64("connecting_time", 0, "All the connections will be evenly distributed in the time (seconds) to avoid burst connections")
-    max_connecting := flag.Uint64("max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0. It will disable connecting_time if set")
-    _stats_report_inteval := flag.Int64("report_interval", 10, "The stats report interval")
-    cfg.viewer_url = flag.String("url", "", "URL to access")
-    retry_times := flag.Int64("retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times,
-default value is 0. If a negative value is provided, it retries forever`)
-    stats_dst := flag.String("report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
-    is_rtcbackup := flag.Bool("rtcbackup", false, "If set, the program will use rtcbackup endpoint")
-    stkid := flag.Uint64("stoken_id", 0, "Specify the subscribe token id, only used for rtcbackup endpoint")
-    ptkid := flag.Uint64("ptoken_id", 0, "Specify the publish token id, only used for rtcbackup endpoint")
-    cfg.rtcbackup_cfg.stoken = flag.String("stoken", "", "Specify the subscribe token, only used for rtcbackup endpoint")
-    cfg.rtcbackup_cfg.ptoken = flag.String("ptoken", "", "Specify the publish token, only used for rtcbackup endpoint")
+    var (
+        test_name string
+        codec string
+        num int
+        logLevel string
+        logfile string
+        pion_dbg bool
+        connecting_time uint64
+        max_connecting uint64
+        report_interval int64
+        retry_times int64
+        stats_dst string
+        ws = flag.NewFlagSet("ws", flag.ExitOnError)
+        rtcbackup = flag.NewFlagSet("rb", flag.ExitOnError)
 
-    flag.Parse()
-    if level, ok := logLevelTable[*logLevel]; ok {
+        viewer_url string
+        wait_on_inactive bool
+
+        ptkid uint64
+        stkid uint64
+        ptoken string
+        stoken string
+        accountId string
+        streamName string
+        platform string
+    )
+
+    // setup common flags
+    func() {
+        for _, fs := range []*flag.FlagSet{ws, rtcbackup} {
+            fs.StringVar(&test_name, "name", "", "Name of the test")
+            fs.StringVar(&codec, "codec", "", "Codec used by remote side. Valid options are h264, vp8 and vp9, default is h264")
+            fs.IntVar(&num, "num", 1, "Number of connections")
+            fs.StringVar(&logLevel, "level", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
+            fs.StringVar(&logfile, "logfile", "", "Log file path, log output goes to log file instead of console")
+            fs.BoolVar(&pion_dbg, "dbg", false, "Turn on pion debug so that more internal info will be printed out")
+            fs.Uint64Var(&connecting_time, "connecting_time", 0, "All the connections will be evenly distributed in the time (seconds) to avoid burst connections")
+            fs.Uint64Var(&max_connecting, "max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0. It will disable connecting_time if set")
+            fs.Int64Var(&report_interval, "report_interval", 10, "The stats report interval, default value is 10s")
+            fs.StringVar(&stats_dst, "report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
+            fs.Int64Var(&retry_times, "retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times, default value is 0. If a negative value is provided, it retries forever`)
+        }
+    }()
+
+    ws.StringVar(&viewer_url, "url", "", "Viewer URL to access [ws]")
+    ws.BoolVar(&wait_on_inactive, "wait_on_inactive", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit [ws]")
+
+    rtcbackup.Uint64Var(&ptkid, "ptoken_id", 0, "Specify the publish token id [rtcbackup]")
+    rtcbackup.Uint64Var(&stkid, "stoken_id", 0, "Specify the subscribe token id [rtcbackup]")
+    rtcbackup.StringVar(&ptoken, "ptoken", "", "Specify the publish token [rtcbackup]")
+    rtcbackup.StringVar(&stoken, "stoken", "", "Specify the subscribe token [rtcbackup]")
+    rtcbackup.StringVar(&accountId, "account_id", "", "Specify the account id [rtcbackup]")
+    rtcbackup.StringVar(&streamName, "stream_name", "", "Specify the stream name [rtcbackup]")
+    rtcbackup.StringVar(&platform, "platform", "dev", "It can be 'dev', 'staging' or 'production', by default it is 'dev' [rtcbackup]")
+
+    var cfg AppCfg
+
+    switch os.Args[1] {
+    case "rb":
+        rtcbackup.Parse(os.Args[2:])
+        cfg.rtcbackup_cfg.ptoken = &ptoken
+        cfg.rtcbackup_cfg.stoken = &stoken
+        cfg.rtcbackup_cfg.ptoken_id = ptkid
+        cfg.rtcbackup_cfg.stoken_id = stkid
+        cfg.rtcbackup_cfg.platform = &platform
+        if *cfg.rtcbackup_cfg.platform == "production" {
+            *cfg.rtcbackup_cfg.platform = ""
+        } else if *cfg.rtcbackup_cfg.platform != "dev" && *cfg.rtcbackup_cfg.platform != "staging" {
+            log.Fatalf("Unknown platform: %s", *cfg.rtcbackup_cfg.platform)
+        } else {
+            *cfg.rtcbackup_cfg.platform = "-" + *cfg.rtcbackup_cfg.platform
+        }
+        cfg.streamAccountId = accountId
+        cfg.streamName = streamName
+        cfg.rtcbackup = true
+    case "ws":
+        ws.Parse(os.Args[2:])
+        cfg.wait_on_inactive = wait_on_inactive
+        cfg.viewer_url = &viewer_url
+        if *cfg.viewer_url == "" {
+            log.Fatal("URL is not specified, exit")
+        }
+
+    default:
+        log.Fatalf("Unknown subcommand '%s', please check the help info", os.Args[1])
+    }
+
+    cfg.codec = &codec
+    cfg.pion_dbg = pion_dbg
+    cfg.test_name = &test_name
+
+
+    if level, ok := logLevelTable[logLevel]; ok {
         log.SetLevel(level)
     } else {
         log.Fatal("Unrecognized log level, exit")
     }
 
-    if *cfg.viewer_url == "" {
-        log.Fatal("URL is not specified, exit")
-    }
-    // we extract account id and stream name from the url
-    m := parse(*&cfg.viewer_url)
-    if _, ok := m["streamAccountId"]; !ok {
-        log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
-    }
-    if _, ok := m["streamName"]; !ok {
-        log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
-    }
-    cfg.streamAccountId = m["streamAccountId"]
-    cfg.streamName = m["streamName"]
-
-    if *num <= 0 {
+    if num <= 0 {
         log.Fatal("Specify a positive number for connections!")
     }
 
-    if *logfile != "" {
-        f, err := os.OpenFile(*logfile, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+    if cfg.rtcbackup {
+        if *cfg.rtcbackup_cfg.stoken == "" || cfg.rtcbackup_cfg.stoken_id == 0 || *cfg.rtcbackup_cfg.ptoken == "" || cfg.rtcbackup_cfg.ptoken_id == 0 {
+            log.Fatal("Must specify pub/sub token and token id")
+        }
+
+        if cfg.streamAccountId == "" || cfg.streamName == "" {
+            log.Fatal("Must specify accountId/streamName")
+        }
+        // we calculate appId and appKey here as this only needs to be done once
+        // but later we'll use them to generate jwt token for each connection as that has a timing effect (expire in some time)
+        cfg.rtcbackup_cfg.appId = generate_appid(cfg.streamAccountId, cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id)
+        cfg.rtcbackup_cfg.appKey = generate_appkey(cfg.rtcbackup_cfg.ptoken, cfg.rtcbackup_cfg.stoken)
+
+        // we should have enough information to figure out the view url, it is printed out for convenience
+        check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v&token=%v"
+        special_rtcbackup_name := generate_rtcbackup_name(cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id, &cfg.streamName)
+        check_url := fmt.Sprintf(check_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.streamAccountId, special_rtcbackup_name, *cfg.rtcbackup_cfg.stoken);
+        fmt.Println("View URL:\n", check_url)
+    } else {
+        // we extract account id and stream name from the url
+        m := parse(cfg.viewer_url)
+        if _, ok := m["streamAccountId"]; !ok {
+            log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
+        }
+        if _, ok := m["streamName"]; !ok {
+            log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
+        }
+        cfg.streamAccountId = m["streamAccountId"]
+        cfg.streamName = m["streamName"]
+    }
+
+    if logfile != "" {
+        f, err := os.OpenFile(logfile, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
         if err != nil {
             log.Fatal("Failed to open log file, exit")
         }
@@ -270,9 +364,9 @@ default value is 0. If a negative value is provided, it retries forever`)
         *cfg.test_name = cur.Format("2006-01-02_15:04:05_") + genRandomHash(4)
     }
 
-    if *stats_dst == "" {
-        *stats_dst = cur.Format("2006-01-02_15:04:05.stats.txt")
-    } else if strings.HasPrefix(*stats_dst, "http://") || strings.HasPrefix(*stats_dst, "https://") {
+    if stats_dst == "" {
+        stats_dst = cur.Format("2006-01-02_15:04:05.stats.txt")
+    } else if strings.HasPrefix(stats_dst, "http://") || strings.HasPrefix(stats_dst, "https://") {
         send_stats = send_stats_post
     }
 
@@ -280,65 +374,45 @@ default value is 0. If a negative value is provided, it retries forever`)
         *cfg.codec = "h264"
     }
 
-    if *_stats_report_inteval < 0 {
+    if report_interval < 0 {
         stats_report_interval = 10
     } else {
-        stats_report_interval = *_stats_report_inteval
-    }
-    cfg.wait_on_inactive = *wait_on_inactive
-    cfg.pion_dbg = *pion_dbg
-    cfg.rtcbackup = *is_rtcbackup
-    cfg.rtcbackup_cfg.stoken_id = *stkid
-    cfg.rtcbackup_cfg.ptoken_id = *ptkid
-    if cfg.rtcbackup {
-        if *cfg.rtcbackup_cfg.stoken == "" || cfg.rtcbackup_cfg.stoken_id == 0 || *cfg.rtcbackup_cfg.ptoken == "" || cfg.rtcbackup_cfg.ptoken_id == 0 {
-            log.Fatal("Must specify pub/sub token and token id for rtcbackup mode")
-        }
-        // we calculate appId and appKey here as this only needs to be done once
-        // but later we'll use them to generate jwt token for each connection as that has a timing effect (expire in some time)
-        cfg.rtcbackup_cfg.appId = generate_appid(cfg.streamAccountId, cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id)
-        cfg.rtcbackup_cfg.appKey = generate_appkey(cfg.rtcbackup_cfg.ptoken, cfg.rtcbackup_cfg.stoken)
-
-        // we should have enough information to figure out the view url, it is printed out for convenience
-        check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v&token=%v"
-        special_rtcbackup_name := generate_rtcbackup_name(cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id, &cfg.streamName)
-        check_url := fmt.Sprintf(check_url_tpl, get_domain_suffix(cfg.viewer_url), cfg.streamAccountId, special_rtcbackup_name, *cfg.rtcbackup_cfg.stoken);
-        fmt.Println("View URL:\n", check_url)
+        stats_report_interval = report_interval
     }
 
-    if *max_connecting > 0 {
-        cfg.max_concurrent_connecting = *max_connecting
+    if max_connecting > 0 {
+        cfg.max_concurrent_connecting = max_connecting
         // note: it's buffered channel, with fixed length "max_concurrent_connecting"
         _c := make(chan struct{}, cfg.max_concurrent_connecting)
         cfg.rate_limit_connecting = &_c
         for i := 0; i < int(cfg.max_concurrent_connecting); i++ {
             *cfg.rate_limit_connecting <- struct{}{}
         }
-        if *connecting_time > 0 {
+        if connecting_time > 0 {
             log.Debug("connecting_time is disabled as max_connecting is specified")
-            *connecting_time = 0
+            connecting_time = 0
         }
     }
 
     // we make the channel with plent of buffer
-    c := make(chan []byte, *num)
+    c := make(chan []byte, num)
     cfg.stats_ch = &c
-    go notify_send_stats(*cfg.stats_ch, *stats_dst)
+    go notify_send_stats(*cfg.stats_ch, stats_dst)
 
     // we'll need to call rand soon, let's do seed here
     rand.Seed(time.Now().UnixNano())
 
     wg := new(sync.WaitGroup)
-    wg.Add(*num)
+    wg.Add(num)
 
     conn_interval := 0.0
-    if *connecting_time > 0 {
-        conn_interval = float64(*connecting_time) / float64(*num)
+    if connecting_time > 0 {
+        conn_interval = float64(connecting_time) / float64(num)
     }
 
-    for i := 0; i < *num; i++ {
-        go connect(wg, i, &cfg, *retry_times)
-        if conn_interval > 0 && i != *num - 1 {
+    for i := 0; i < num; i++ {
+        go connect(wg, i, &cfg, retry_times)
+        if conn_interval > 0 && i != num - 1 {
             time.Sleep(time.Duration(conn_interval * 1e9))
         }
     }
