@@ -355,6 +355,10 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
     pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
         ldebug(st.cid, "ice connection state changed to ", state)
         ice_state = state
+        if ice_state == webrtc.ICEConnectionStateFailed {
+            lerror(st.cid, "ice connection failed, close peerconnection")
+            pc.Close()
+        }
         if (!iceConnected && ice_state == webrtc.ICEConnectionStateConnected) {
             iceConnected = true
             cs.ICESetup = (float64(time.Since(iceStart)))/1000000.0
@@ -366,6 +370,10 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
     pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
         ldebug(st.cid, "connection state switched to ", state)
         conn_state = state
+        if conn_state == webrtc.PeerConnectionStateFailed {
+            lerror(st.cid, "connection failed, close peerconnection")
+            pc.Close()
+        }
         if (!dtlsConnected && iceConnected && state == webrtc.PeerConnectionStateConnected) {
             dtlsConnected = true;
             cs.DTLSSetup = (float64(time.Since(dtlsStart)))/1000000.0
@@ -1030,12 +1038,13 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         select {
         case <- loop_ch:
-            close(state.ws_exit)
+            break
         case <- state.rtp_exit:
-            close(state.ws_exit)
+            break
         case <- state.rtcp_exit:
-            close(state.ws_exit)
+            break
         }
+        close(state.ws_exit)
 
         if retry == 0 {
             break
