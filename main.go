@@ -249,16 +249,16 @@ func main() {
     func() {
         for _, fs := range []*flag.FlagSet{ws, rtcbackup} {
             fs.StringVar(&test_name, "name", "", "Name of the test")
-            fs.StringVar(&codec, "codec", "h264", "Codec used by remote side. Valid options are h264, vp8 and vp9, default is h264")
+            fs.StringVar(&codec, "codec", "h264", "Codec used by remote side. Valid options are h264, vp8 and vp9.")
             fs.IntVar(&num, "num", 1, "Number of connections")
-            fs.StringVar(&logLevel, "level", "info", "Specify log level, available levels are: panic, error, warn, info and debug")
-            fs.StringVar(&logfile, "logfile", "", "Log file path, log output goes to log file instead of console")
-            fs.BoolVar(&pion_dbg, "dbg", false, "Turn on pion debug so that more internal info will be printed out")
-            fs.Uint64Var(&connecting_time, "connecting_time", 0, "All the connections will be evenly distributed in the time (seconds) to avoid burst connections")
-            fs.Uint64Var(&max_connecting, "max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0. It will disable connecting_time if set")
-            fs.Int64Var(&report_interval, "report_interval", 10, "The stats report interval, default value is 10s")
+            fs.StringVar(&logLevel, "level", "info", "Specify log level, available levels are: panic, error, warn, info and debug.")
+            fs.StringVar(&logfile, "logfile", "", "Log file path, log output goes to log file instead of console.")
+            fs.BoolVar(&pion_dbg, "dbg", false, "Turn on pion debug so that more internal info will be printed out.")
+            fs.Uint64Var(&connecting_time, "connecting_time", 0, "All the connections will be evenly distributed in the time (seconds) to avoid burst connections.")
+            fs.Uint64Var(&max_connecting, "max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0. It will disable connecting_time if set.")
+            fs.Int64Var(&report_interval, "report_interval", 10, "The stats report interval.")
             fs.StringVar(&stats_dst, "report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
-            fs.Int64Var(&retry_times, "retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times, default value is 0. If a negative value is provided, it retries forever`)
+            fs.Int64Var(&retry_times, "retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times, default value is 0. If a negative value is provided, it retries forever.`)
         }
     }()
 
@@ -271,7 +271,7 @@ func main() {
     rtcbackup.StringVar(&stoken, "stoken", "", "Specify the subscribe token [rtcbackup]")
     rtcbackup.StringVar(&accountId, "account_id", "", "Specify the account id [rtcbackup]")
     rtcbackup.StringVar(&streamName, "stream_name", "", "Specify the stream name [rtcbackup]")
-    rtcbackup.StringVar(&platform, "platform", "dev", "It can be 'dev', 'staging' or 'production', by default it is 'dev' [rtcbackup]")
+    rtcbackup.StringVar(&platform, "platform", "dev", "It can be 'dev', 'staging' or 'production' [rtcbackup]")
 
     var cfg AppCfg
 
