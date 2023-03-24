@@ -76,9 +76,8 @@ type ConnectStats struct {
     HttpSubscribe float64        `json:"httpSubscribe"`
     ICESetup float64             `json:"iceSetup"`
     DTLSSetup float64            `json:"dtlsSetup"`
-    // SDPOffer float64             `json:"sdpOffer"`
-    // SDPAnswer float64            `json:"sdpAnswer"`
     FirstFrame float64           `json:"firstFrame"`
+    TotalTime float64            `json:"totalTime"`
 }
 
 func lerror(args ...interface{}) {
@@ -403,6 +402,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                 if (!firstFrameReceived) {
                     firstFrameReceived = true
                     cs.FirstFrame = (float64(time.Since(firstFrame)))/1000000.0
+                    cs.TotalTime = (float64(time.Since(iceStart)))/1000000.0
                     // we'll send the connect stats now
                     bs, err := json.Marshal(cs)
                     if err == nil {

@@ -406,12 +406,14 @@ func main() {
         conn_interval = float64(connecting_time) / float64(num)
     }
 
+    before_connect := time.Now()
     for i := 0; i < num; i++ {
         go connect(wg, i, &cfg, retry_times)
         if conn_interval > 0 && i != num - 1 {
             time.Sleep(time.Duration(conn_interval * 1e9))
         }
     }
+    log.Info("The total connecting time(s): ", float64(time.Since(before_connect))/1e9)
 
     wg.Wait()
     log.Info("Scale client exit")
