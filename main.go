@@ -408,7 +408,7 @@ func main() {
 
     before_connect := time.Now()
     for i := 0; i < num; i++ {
-        go connect(wg, i, &cfg, retry_times)
+        connect(wg, i, &cfg, retry_times)
         if conn_interval > 0 && i != num - 1 {
             time.Sleep(time.Duration(conn_interval * 1e9))
         }
