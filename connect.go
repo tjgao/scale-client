@@ -76,7 +76,7 @@ type ConnectStats struct {
     HttpSubscribe float64        `json:"httpSubscribe"`
     ICESetup float64             `json:"iceSetup"`
     DTLSSetup float64            `json:"dtlsSetup"`
-    FirstFrame float64           `json:"firstFrame"`
+    FirstRTP float64             `json:"firstRTP"`
     TotalTime float64            `json:"totalTime"`
 }
 
@@ -346,10 +346,10 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
 
     iceStart := time.Now()
     dtlsStart := iceStart
-    firstFrame := dtlsStart
+    firstRTP := dtlsStart
     iceConnected := false
     dtlsConnected := false
-    firstFrameReceived := false
+    firstRTPReceived := false
     pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
         ldebug(st.cid, "ice connection state changed to ", state)
         ice_state = state
@@ -377,7 +377,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
         if (!dtlsConnected && iceConnected && state == webrtc.PeerConnectionStateConnected) {
             dtlsConnected = true;
             cs.DTLSSetup = (float64(time.Since(dtlsStart)))/1000000.0
-            firstFrame = time.Now()
+            firstRTP = time.Now()
         }
     })
 
@@ -399,9 +399,9 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                     ldebug(st.cid, fmt.Sprintf("RTP read goroutine for %v: %v exit", tr.Kind().String(), tr.SSRC()))
                     break
                 }
-                if (!firstFrameReceived) {
-                    firstFrameReceived = true
-                    cs.FirstFrame = (float64(time.Since(firstFrame)))/1000000.0
+                if (!firstRTPReceived) {
+                    firstRTPReceived = true
+                    cs.FirstRTP = (float64(time.Since(firstRTP)))/1000000.0
                     cs.TotalTime = (float64(time.Since(iceStart)))/1000000.0
                     // we'll send the connect stats now
                     bs, err := json.Marshal(cs)
