@@ -522,9 +522,8 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
                 if idx == 0 {
                     ticker.Stop()
                     video_done <- true
-                    <- audio_done 
+                    <- audio_done
                     ticker.Reset(cfg.rtcbackup_cfg.streaming_video.Interval)
-                    ldebug(st.cid, "Video start over")
                 }
             case <- st.conn_exit:
                 return
@@ -573,7 +572,6 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
                     <- video_done
                     ticker.Reset(OggPageDuration)
                     lastGranu = 0
-                    ldebug(st.cid, "Audio start over")
                 }
             case <- st.conn_exit:
                 return
@@ -1041,9 +1039,13 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
     const rtcbackup_view_tpl string = "https://director%v.millicast.com/api/rtcbackup/sub/%v/%v"
     const rtcbackup_stream_tpl string ="https://director%v.millicast.com/api/rtcbackup/pub/%v/%v?Vcodec=%v"
 
+    postfix := ""
+    if cid > 0 {
+        postfix = strconv.Itoa(cid)
+    }
     var rtc_url string = fmt.Sprintf(rtcbackup_view_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName)
     if cfg.rtcbackup_cfg.streaming {
-        rtc_url = fmt.Sprintf(rtcbackup_stream_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName, *cfg.codec)
+        rtc_url = fmt.Sprintf(rtcbackup_stream_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName + postfix, *cfg.codec)
     }
 
     action := "sub"
@@ -1056,10 +1058,8 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         cs.TestName = *cfg.test_name
 
         var token string
-        if cfg.rtcbackup_cfg.streaming && cid != 0 {
-            token = generate_jwt_token(generate_rtcbackup_payload(cfg.rtcbackup_cfg.appId, action, cfg.streamName + strconv.Itoa(cid)), cfg.rtcbackup_cfg.appKey)
-        } else {
-            token = generate_jwt_token(generate_rtcbackup_payload(cfg.rtcbackup_cfg.appId, action, cfg.streamName), cfg.rtcbackup_cfg.appKey)
+        if cfg.rtcbackup_cfg.streaming  {
+            token = generate_jwt_token(generate_rtcbackup_payload(cfg.rtcbackup_cfg.appId, action, cfg.streamName + postfix), cfg.rtcbackup_cfg.appKey)
         }
 
         state.pc, state.g = create_peerconnection(cfg, state)
