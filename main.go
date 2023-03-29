@@ -12,11 +12,16 @@ import (
     "math/rand"
     "net/http"
     "os"
+    "io"
+    "errors"
     "regexp"
     "strings"
     "sync"
+    "strconv"
     "time"
 
+	"github.com/pion/webrtc/v3/pkg/media/ivfreader"
+	"github.com/pion/webrtc/v3/pkg/media/oggreader"
     log "github.com/sirupsen/logrus"
 )
 
@@ -29,6 +34,21 @@ type rtcbackup_payload struct {
     Exp float64        `json:"exp"`
 }
 
+
+type VideoData struct {
+    Interval time.Duration
+    Frames [][]byte
+}
+
+// Currently we have assumption for the ogg file
+// 1. it is opus
+// 2. the page duration is 20ms
+const OggPageDuration = time.Millisecond * 20
+
+type OggFrame struct {
+    frame []byte
+    granu uint64
+}
 
 type RtcBackupCfg struct {
     // sub token id
@@ -45,6 +65,13 @@ type RtcBackupCfg struct {
     appId string
     // appKey
     appKey string
+    // streaming or viewing?
+    streaming bool
+    // streaming video data
+    streaming_video *VideoData
+    // streaming audio data
+    streaming_audio []OggFrame
+    
 }
 
 type AppCfg struct {
@@ -194,15 +221,62 @@ func hmac_sha256(body string, secret string) string {
     return b64.StdEncoding.EncodeToString(bs)
 }
 
-func generate_rtcbackup_payload(appId string, streamName string) string {
+func generate_rtcbackup_payload(appId string, action string, streamName string) string {
     exp := float64(time.Now().UnixMilli())/1000.0 + 60
-    p := rtcbackup_payload{Version: "1.0", AppId: appId, StreamId: streamName, Action: "sub", EnableSubAuth: false, Exp: exp}
+    p := rtcbackup_payload{Version: "1.0", AppId: appId, StreamId: streamName, Action: action, EnableSubAuth: false, Exp: exp}
     bs, err := json.Marshal(&p)
     if err != nil {
         log.Fatal("Failed to create json: ", err);
     }
     return string(bs)
 }
+
+func load_ivf_video(f *string) *VideoData {
+    file, err := os.Open(*f)
+    if err != nil {
+        panic(err)
+    }
+    ivf, hdr, err := ivfreader.NewWith(file)
+    if err != nil {
+        panic(err)
+    }
+    var data VideoData
+    data.Interval = time.Millisecond * time.Duration((float32(hdr.TimebaseNumerator)/float32(hdr.TimebaseDenominator))*1000)
+    for {
+        frame, _, err := ivf.ParseNextFrame()
+        if errors.Is(err, io.EOF) {
+            break
+        } else if err != nil {
+            panic(err)
+        }
+        data.Frames = append(data.Frames, frame)
+    }
+    return &data
+}
+
+
+func load_ogg_audio(f *string) []OggFrame {
+    file, err := os.Open(*f)
+    if err != nil {
+        panic(err)
+    }
+    ogg, _, oggErr := oggreader.NewWith(file)
+    if oggErr != nil {
+        panic(oggErr)
+    }
+    var oggFrames []OggFrame
+    for {
+        pageData, hdr, oggErr := ogg.ParseNextPage()
+        if errors.Is(oggErr, io.EOF) {
+            break
+        } else if oggErr != nil {
+            panic(oggErr)
+        }
+        oggFrames = append(oggFrames, OggFrame{frame:pageData, granu:hdr.GranulePosition}) 
+    }
+    return oggFrames
+}
+
 
 func main() {
     if len(os.Args) < 2 {
@@ -243,6 +317,9 @@ func main() {
         accountId string
         streamName string
         platform string
+        streaming bool
+        streaming_video string
+        streaming_audio string
     )
 
     // setup common flags
@@ -272,6 +349,9 @@ func main() {
     rtcbackup.StringVar(&accountId, "account_id", "", "Specify the account id [rtcbackup]")
     rtcbackup.StringVar(&streamName, "stream_name", "", "Specify the stream name [rtcbackup]")
     rtcbackup.StringVar(&platform, "platform", "dev", "It can be 'dev', 'staging' or 'production' [rtcbackup]")
+    rtcbackup.BoolVar(&streaming, "streaming", false, "The client will act as a streaming client instead of a viewer if this is on, video/audio files are required [rtcbackup]")
+    rtcbackup.StringVar(&streaming_video, "streaming_video", "", "Streaming video file [rtcbackup]")
+    rtcbackup.StringVar(&streaming_audio, "streaming_audio", "", "Streaming audio file [rtcbackup]")
 
     var cfg AppCfg
 
@@ -292,6 +372,14 @@ func main() {
         }
         cfg.streamAccountId = accountId
         cfg.streamName = streamName
+        cfg.rtcbackup_cfg.streaming = streaming
+        if streaming {
+            if streaming_audio == "" || streaming_video == "" {
+                log.Fatal("Need to specify video and audio files for streaming")
+            }
+            cfg.rtcbackup_cfg.streaming_video = load_ivf_video(&streaming_video)
+            cfg.rtcbackup_cfg.streaming_audio = load_ogg_audio(&streaming_audio)
+        }
         cfg.rtcbackup = true
     case "ws":
         ws.Parse(os.Args[2:])
@@ -320,6 +408,9 @@ func main() {
         log.Fatal("Specify a positive number for connections!")
     }
 
+    // we'll need to call rand soon, let's do seed here
+    rand.Seed(time.Now().UnixNano())
+
     if cfg.rtcbackup {
         if *cfg.rtcbackup_cfg.stoken == "" || cfg.rtcbackup_cfg.stoken_id == 0 || *cfg.rtcbackup_cfg.ptoken == "" || cfg.rtcbackup_cfg.ptoken_id == 0 {
             log.Fatal("Must specify pub/sub token and token id")
@@ -336,8 +427,15 @@ func main() {
         // we should have enough information to figure out the view url, it is printed out for convenience
         check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v&token=%v"
         special_rtcbackup_name := generate_rtcbackup_name(cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id, &cfg.streamName)
+        fmt.Println("View URL:")
         check_url := fmt.Sprintf(check_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.streamAccountId, special_rtcbackup_name, *cfg.rtcbackup_cfg.stoken);
-        fmt.Println("View URL:\n", check_url)
+        fmt.Println(check_url)
+        if num > 1 {
+            for i := 1; i < num; i++ {
+                check_url = fmt.Sprintf(check_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.streamAccountId, special_rtcbackup_name + strconv.Itoa(i), *cfg.rtcbackup_cfg.stoken)
+                fmt.Println(check_url)
+            }
+        }
     } else {
         // we extract account id and stream name from the url
         m := parse(cfg.viewer_url)
@@ -390,13 +488,10 @@ func main() {
         }
     }
 
-    // we make the channel with plent of buffer
+    // we make the channels. we have `num` of them, because we don't want to block the goroutines 
     c := make(chan []byte, num)
     cfg.stats_ch = &c
     go notify_send_stats(*cfg.stats_ch, stats_dst)
-
-    // we'll need to call rand soon, let's do seed here
-    rand.Seed(time.Now().UnixNano())
 
     wg := new(sync.WaitGroup)
     wg.Add(num)
