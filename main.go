@@ -17,7 +17,6 @@ import (
     "regexp"
     "strings"
     "sync"
-    "strconv"
     "time"
 
 	"github.com/pion/webrtc/v3/pkg/media/ivfreader"
@@ -71,7 +70,7 @@ type RtcBackupCfg struct {
     streaming_video *VideoData
     // streaming audio data
     streaming_audio []OggFrame
-    
+
 }
 
 type AppCfg struct {
@@ -273,7 +272,7 @@ func load_ogg_audio(f *string) []OggFrame {
         } else if oggErr != nil {
             panic(oggErr)
         }
-        oggFrames = append(oggFrames, OggFrame{frame:pageData, granu:hdr.GranulePosition}) 
+        oggFrames = append(oggFrames, OggFrame{frame:pageData, granu:hdr.GranulePosition})
     }
     log.Info("Load ogg file: ", *f, " ", len(oggFrames), " frames")
     return oggFrames
@@ -429,15 +428,20 @@ func main() {
         // we should have enough information to figure out the view url, it is printed out for convenience
         check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v&token=%v"
         special_rtcbackup_name := generate_rtcbackup_name(cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id, &cfg.streamName)
-        fmt.Println("View URL:")
         check_url := fmt.Sprintf(check_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.streamAccountId, special_rtcbackup_name, *cfg.rtcbackup_cfg.stoken);
+        fmt.Println("\n---------------------------------------------------------------")
+        fmt.Println("View URL:")
         fmt.Println(check_url)
+        fmt.Println()
         if num > 1 {
-            for i := 1; i < num; i++ {
-                check_url = fmt.Sprintf(check_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.streamAccountId, special_rtcbackup_name + strconv.Itoa(i), *cfg.rtcbackup_cfg.stoken)
-                fmt.Println(check_url)
-            }
+            //
+            fmt.Println(fmt.Sprintf("%v streamings have been created, you can watch all the streamings by adding numbers[%v-%v] to the original streamId. For example, \"streamId=MyId/aTuO.zXy.stream\" -> \"streamId=MyId/aTuO.zXy.stream1\"", num, 1, num-1))
+            // for i := 1; i < num; i++ {
+            //     check_url = fmt.Sprintf(check_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.streamAccountId, special_rtcbackup_name + strconv.Itoa(i), *cfg.rtcbackup_cfg.stoken)
+            //     fmt.Println(check_url)
+            // }
         }
+        fmt.Print("---------------------------------------------------------------\n\n")
     } else {
         // we extract account id and stream name from the url
         m := parse(cfg.viewer_url)
@@ -490,7 +494,7 @@ func main() {
         }
     }
 
-    // we make the channels. we have `num` of them, because we don't want to block the goroutines 
+    // we make the channels. we have `num` of them, because we don't want to block the goroutines
     c := make(chan []byte, num)
     cfg.stats_ch = &c
     go notify_send_stats(*cfg.stats_ch, stats_dst)
