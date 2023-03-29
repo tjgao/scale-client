@@ -251,6 +251,7 @@ func load_ivf_video(f *string) *VideoData {
         }
         data.Frames = append(data.Frames, frame)
     }
+    log.Info("Load ivf file: ", *f, " ", len(data.Frames), " frames")
     return &data
 }
 
@@ -274,6 +275,7 @@ func load_ogg_audio(f *string) []OggFrame {
         }
         oggFrames = append(oggFrames, OggFrame{frame:pageData, granu:hdr.GranulePosition}) 
     }
+    log.Info("Load ogg file: ", *f, " ", len(oggFrames), " frames")
     return oggFrames
 }
 

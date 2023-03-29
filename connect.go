@@ -67,8 +67,10 @@ type RunningState struct {
     LocalUser  string             // ice user
     LocalPwd   string             // ice pwd
     SubResp    *SubscribeResp     // subscribe response
+    pc         *webrtc.PeerConnection
+    g          *stats.Getter
+    offer      *webrtc.SessionDescription
     connecting atomic.Bool
-    local_sdp  string
     conn_exit  chan struct{}
     close_conn func()
 }
@@ -336,8 +338,10 @@ func create_peerconnection(cfg *AppCfg, st *RunningState) (*webrtc.PeerConnectio
     return pc, &g
 }
 
-func stats_read(cfg *AppCfg, st *RunningState,  pc *webrtc.PeerConnection, g *stats.Getter) {
+func stats_read(cfg *AppCfg, st *RunningState) {
     last_stats := map[webrtc.SSRC]stats.InboundRTPStreamStats{}
+    pc := st.pc
+    g := st.g
     for {
         select {
         case <- st.conn_exit:
@@ -445,7 +449,7 @@ func stats_read(cfg *AppCfg, st *RunningState,  pc *webrtc.PeerConnection, g *st
 }
 
 
-func send_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_sdp *string) {
+func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
     if cfg.rate_limit_connecting != nil {
         defer func() {
             b := st.connecting.Load()
@@ -455,18 +459,8 @@ func send_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_sdp 
             }
         }()
     }
-    var err error
 
-    pc, g := create_peerconnection(cfg, st)
-
-    // _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly})
-    // if err != nil {
-    //     panic(err)
-    // }
-    // _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly})
-    // if err != nil {
-    //     panic(err)
-    // }
+    pc := st.pc
 
     iceConnected, iceConnectedCancel := context.WithCancel(context.Background())
 
@@ -500,6 +494,11 @@ func send_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_sdp 
     // read rtcp pkts
     go rtcp_read_goroutine(videoRtpSender)
 
+    // try to sync between audio and video
+    // whoever finishes first, shall wait for the other one to be done
+    video_done := make(chan bool, 1)
+    audio_done := make(chan bool, 1)
+
     // send rtp pkts
     go func() {
         <- iceConnected.Done()
@@ -508,12 +507,28 @@ func send_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_sdp 
         // we loop forever
         var idx uint64
         var total_frames uint64 = uint64(len(cfg.rtcbackup_cfg.streaming_video.Frames))
-        for ; true; <-ticker.C {
-            frame := cfg.rtcbackup_cfg.streaming_video.Frames[idx]
-            if ivfErr := videoTrack.WriteSample(media.Sample{Data:frame, Duration:time.Second}); ivfErr != nil {
-                panic(ivfErr)
+        for {
+            select {
+            case <- ticker.C:
+                frame := cfg.rtcbackup_cfg.streaming_video.Frames[idx]
+                if ivfErr := videoTrack.WriteSample(media.Sample{Data:frame, Duration:time.Second}); ivfErr != nil {
+                    linfo(st.cid, "Failed to send video rtp: ", ivfErr)
+                    st.close_conn()
+                    close(video_done)
+                    return
+                }
+                idx = (idx + 1) % total_frames
+                // we are back at start point
+                if idx == 0 {
+                    ticker.Stop()
+                    video_done <- true
+                    <- audio_done 
+                    ticker.Reset(cfg.rtcbackup_cfg.streaming_video.Interval)
+                    ldebug(st.cid, "Video start over")
+                }
+            case <- st.conn_exit:
+                return
             }
-            idx = (idx + 1) % total_frames
         }
     }()
 
@@ -536,16 +551,33 @@ func send_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_sdp 
         ticker := time.NewTicker(OggPageDuration)
         // we loop forever
         var idx uint64
-        var total_frames uint64 = uint64(len(cfg.rtcbackup_cfg.streaming_video.Frames))
-        for ; true; <- ticker.C {
-            f := cfg.rtcbackup_cfg.streaming_audio[idx]
-            sampleCount := float64(f.granu - lastGranu)
-            lastGranu = f.granu
-            sampleDuration := time.Duration((sampleCount/48000)*1000)
-            if oggErr := audioTrack.WriteSample(media.Sample{Data:f.frame, Duration:sampleDuration}); oggErr != nil {
-                panic(oggErr)
+        var total_frames uint64 = uint64(len(cfg.rtcbackup_cfg.streaming_audio))
+        for {
+            select {
+            case <- ticker.C:
+                f := cfg.rtcbackup_cfg.streaming_audio[idx]
+                sampleCount := float64(f.granu - lastGranu)
+                lastGranu = f.granu
+                sampleDuration := time.Duration((sampleCount/48000)*1000) * time.Millisecond
+                if oggErr := audioTrack.WriteSample(media.Sample{Data:f.frame, Duration:sampleDuration}); oggErr != nil {
+                    linfo(st.cid, "Failed to send audio rtp: ", oggErr)
+                    st.close_conn()
+                    close(audio_done)
+                    return
+                }
+                idx = (idx + 1) % total_frames
+                // we are back at start point
+                if idx == 0 {
+                    ticker.Stop()
+                    audio_done <- true
+                    <- video_done
+                    ticker.Reset(OggPageDuration)
+                    lastGranu = 0
+                    ldebug(st.cid, "Audio start over")
+                }
+            case <- st.conn_exit:
+                return
             }
-            idx = (idx + 1) % total_frames
         }
     }()
 
@@ -564,23 +596,6 @@ func send_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_sdp 
         }
     })
 
-    offer, err := pc.CreateOffer(nil)
-    if err != nil {
-        panic(err)
-    }
-
-    fmt.Printf("offer: %v\n", offer)
-
-    if err = pc.SetLocalDescription(offer); err != nil {
-        panic(err)
-    }
-
-    remote := webrtc.SessionDescription{SDP: *answer_sdp, Type: webrtc.SDPTypeAnswer}
-    if err = pc.SetRemoteDescription(remote); err != nil {
-        panic(err)
-    }
-
-    go stats_read(cfg, st, pc, g)
 }
 
 
@@ -598,7 +613,8 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
     }
 
     var err error
-    pc, g := create_peerconnection(cfg, st)
+    pc, offer := st.pc, st.offer
+
     var ice_state webrtc.ICEConnectionState = webrtc.ICEConnectionStateNew
     var conn_state webrtc.PeerConnectionState = webrtc.PeerConnectionStateNew
 
@@ -639,15 +655,6 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
         }
     })
 
-    _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
-    if err != nil {
-        panic(err)
-    }
-    _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
-    if err != nil {
-        panic(err)
-    }
-
     pc.OnTrack(func(tr *webrtc.TrackRemote, rc *webrtc.RTPReceiver) {
         go func() {
             rtp_buf := make([]byte, MAX_RTP_LEN)
@@ -687,12 +694,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
         }()
     })
 
-    offer, err := pc.CreateOffer(nil)
-    if err != nil {
-        panic(err)
-    }
-
-    if err = pc.SetLocalDescription(offer); err != nil {
+    if err = pc.SetLocalDescription(*offer); err != nil {
         panic(err)
     }
 
@@ -701,7 +703,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
         panic(err)
     }
 
-    go stats_read(cfg, st, pc, g)
+    go stats_read(cfg, st)
 }
 
 // This is a way to directly manipulate transport objects and ice gather object
@@ -832,7 +834,7 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
                     }
                 }
                 // go receive_streaming_direct(cfg, st, info)
-                go receive_streaming(cfg, st, cs, &info.orig_sdp)
+                receive_streaming(cfg, st, cs, &info.orig_sdp)
             }
         } else {
             if n, ok := ev["name"]; !ok {
@@ -899,15 +901,7 @@ func create_state(cid int, cfg *AppCfg) *RunningState {
         log.Fatal("Failed to generate cert for DTLS: ", err)
     }
 
-    fingerprint, err := cert.GetFingerprints()
-    if err != nil {
-        log.Fatal("Failed to calculate fingerprint from cert: ", err)
-    }
-
     var state = RunningState{cid: cid, Cert: *cert, LocalUser: genRandomHash(16), LocalPwd: genRandomHash(48)}
-
-    req_sdp := createReqSDP(cfg.rtcbackup_cfg.streaming, state.LocalUser, state.LocalPwd, "sha-256", fingerprint[0].Value)
-    state.local_sdp = req_sdp
 
     return &state
 }
@@ -984,9 +978,9 @@ func generate_jwt_token(payload string, appKey string) string {
 }
 
 
-func rtcbackup_request(st *RunningState, url string, token *string) *string {
+func rtcbackup_request(st *RunningState, url string, token *string, sdp *string) *string {
     // send rtcbackup post request with the token
-    req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(st.local_sdp)))
+    req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(*sdp)))
     if err != nil {
         lerror(st.cid, "Failed to create HTTP post object: ", err);
         return nil
@@ -1006,6 +1000,17 @@ func rtcbackup_request(st *RunningState, url string, token *string) *string {
         return nil
     }
     return &answer
+}
+
+func send_streaming(cfg *AppCfg, st *RunningState, answer_sdp *string) {
+    err := st.pc.SetLocalDescription(*st.offer)
+    if err != nil {
+       panic(err)
+    }
+    remote := webrtc.SessionDescription{SDP: *answer_sdp, Type: webrtc.SDPTypeAnswer}
+    st.pc.SetRemoteDescription(remote)
+
+    // go stats_read(cfg, st)
 }
 
 func connect(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
@@ -1057,8 +1062,30 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             token = generate_jwt_token(generate_rtcbackup_payload(cfg.rtcbackup_cfg.appId, action, cfg.streamName), cfg.rtcbackup_cfg.appKey)
         }
 
+        state.pc, state.g = create_peerconnection(cfg, state)
+
+        if !cfg.rtcbackup_cfg.streaming {
+            _, err := state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+            if err != nil {
+                panic(err)
+            }
+            _, err = state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+            if err != nil {
+                panic(err)
+            }
+        } else {
+            prepare_send_streaming(cfg, state)
+        }
+
+
+        offer, err := state.pc.CreateOffer(nil)
+        if err != nil {
+            panic(err)
+        }
+        state.offer = &offer
+
         now := time.Now()
-        answer := rtcbackup_request(state, rtc_url, &token)
+        answer := rtcbackup_request(state, rtc_url, &token, &state.offer.SDP)
         if answer == nil {
             if !keep_trying(cid, &retry, fmt.Sprintf("Failed to POST offer sdp")) {
                 return
@@ -1078,12 +1105,13 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }
 
         if cfg.rtcbackup_cfg.streaming {
-            go send_streaming(cfg, state, &cs, answer)
+            send_streaming(cfg, state, answer)
         } else {
-            go receive_streaming(cfg, state, &cs, answer)
+            receive_streaming(cfg, state, &cs, answer)
         }
 
         <-state.conn_exit
+        state.pc.Close()
 
         ldebug(cid, "Connection is completely closed")
         if retry == 0 {
@@ -1159,9 +1187,26 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             }
         }
 
+        state.pc, state.g = create_peerconnection(cfg, state)
+
+        _, err = state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+        if err != nil {
+            panic(err)
+        }
+        _, err = state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+        if err != nil {
+            panic(err)
+        }
+
         // prepare json
+        offer, err := state.pc.CreateOffer(nil)
+        if err != nil {
+            panic(err)
+        }
+        state.offer = &offer
         _events := []string{"active", "inactive", "layers", "viewercount"}
-        var sdp_mp = map[string]interface{}{"sdp": state.local_sdp, "streamId": cfg.streamName, "events": _events}
+        var sdp_mp = map[string]interface{}{"sdp": offer.SDP, "streamId": cfg.streamName, "events": _events}
+
         var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
         bs, err := json.Marshal(&cmd)
         if err != nil {
