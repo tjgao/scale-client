@@ -1046,6 +1046,8 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
     var rtc_url string = fmt.Sprintf(rtcbackup_view_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName)
     if cfg.rtcbackup_cfg.streaming {
         rtc_url = fmt.Sprintf(rtcbackup_stream_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName + postfix, *cfg.codec)
+    } else if cfg.rtcbackup_cfg.one_on_one {
+        rtc_url = fmt.Sprintf(rtcbackup_view_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName + postfix)
     }
 
     action := "sub"
@@ -1058,7 +1060,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         cs.TestName = *cfg.test_name
 
         var token string
-        if cfg.rtcbackup_cfg.streaming  {
+        if cfg.rtcbackup_cfg.streaming || cfg.rtcbackup_cfg.one_on_one {
             token = generate_jwt_token(generate_rtcbackup_payload(cfg.rtcbackup_cfg.appId, action, cfg.streamName + postfix), cfg.rtcbackup_cfg.appKey)
         }
 

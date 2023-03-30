@@ -66,6 +66,8 @@ type RtcBackupCfg struct {
     appKey string
     // streaming or viewing?
     streaming bool
+    // one on one
+    one_on_one bool
     // streaming video data
     streaming_video *VideoData
     // streaming audio data
@@ -321,6 +323,7 @@ func main() {
         streaming bool
         streaming_video string
         streaming_audio string
+        one_on_one bool
     )
 
     // setup common flags
@@ -353,6 +356,7 @@ func main() {
     rtcbackup.BoolVar(&streaming, "streaming", false, "The client will act as a streaming client instead of a viewer if this is on, video/audio files are required [rtcbackup]")
     rtcbackup.StringVar(&streaming_video, "streaming_video", "", "Streaming video file [rtcbackup]")
     rtcbackup.StringVar(&streaming_audio, "streaming_audio", "", "Streaming audio file [rtcbackup]")
+    rtcbackup.BoolVar(&one_on_one, "one_on_one", false, "This flag is used with rtcbacup viewers. Instead of adding all these viewers to one stream, this flag will make each viewer subscribe a different stream. The rule is similar to rtcbackup streaming. [rtcbackup]")
 
     var cfg AppCfg
 
@@ -364,6 +368,7 @@ func main() {
         cfg.rtcbackup_cfg.ptoken_id = ptkid
         cfg.rtcbackup_cfg.stoken_id = stkid
         cfg.rtcbackup_cfg.platform = &platform
+        cfg.rtcbackup_cfg.one_on_one = one_on_one
         if *cfg.rtcbackup_cfg.platform == "production" {
             *cfg.rtcbackup_cfg.platform = ""
         } else if *cfg.rtcbackup_cfg.platform != "dev" && *cfg.rtcbackup_cfg.platform != "staging" {
@@ -433,7 +438,7 @@ func main() {
         fmt.Println("View URL:")
         fmt.Println(check_url)
         fmt.Println()
-        if num > 1 {
+        if num > 1 && streaming {
             //
             fmt.Println(fmt.Sprintf("%v streamings have been created, you can watch all the streamings by adding numbers[%v-%v] to the original streamId. For example, \"streamId=MyId/aTuO.zXy.stream\" -> \"streamId=MyId/aTuO.zXy.stream1\"", num, 1, num-1))
             // for i := 1; i < num; i++ {
