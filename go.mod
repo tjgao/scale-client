@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/gorilla/websocket v1.5.0
-	github.com/pion/ice/v2 v2.3.0
+	github.com/pion/ice/v2 v2.3.2
 	github.com/pion/interceptor v0.1.12
 	github.com/pion/logging v0.2.2
 	github.com/pion/sdp/v2 v2.4.0
@@ -33,4 +33,4 @@ require (
 	golang.org/x/sys v0.5.0 // indirect
 )
 
-replace github.com/pion/ice/v2 => /home/tiejun/code/github/pion/ice
+replace github.com/pion/ice/v2 v2.3.2 => github.com/tjgao/ice/v2 v2.3.2
