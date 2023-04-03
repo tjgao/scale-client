@@ -19,6 +19,7 @@ import (
     "sync"
     "time"
 
+	"github.com/pion/webrtc/v3/pkg/media/h264reader"
 	"github.com/pion/webrtc/v3/pkg/media/ivfreader"
 	"github.com/pion/webrtc/v3/pkg/media/oggreader"
     log "github.com/sirupsen/logrus"
@@ -232,6 +233,32 @@ func generate_rtcbackup_payload(appId string, action string, streamName string) 
     return string(bs)
 }
 
+func load_h264_video(f *string) *VideoData {
+    file, err := os.Open(*f)
+    if err != nil {
+        panic(err)
+    }
+
+    h264, err := h264reader.NewReader(file)
+    if err != nil {
+        panic(err)
+    }
+
+    var data VideoData
+    data.Interval = time.Second / 30.0
+    for {
+        nal, err := h264.NextNAL()
+        if errors.Is(err, io.EOF) {
+            break
+        } else if err != nil {
+            panic(err)
+        }
+        data.Frames = append(data.Frames, nal.Data)
+    }
+    log.Info("Load h264 file: ", *f, " ", len(data.Frames), " frames")
+    return &data
+}
+
 func load_ivf_video(f *string) *VideoData {
     file, err := os.Open(*f)
     if err != nil {
@@ -383,7 +410,11 @@ func main() {
             if streaming_audio == "" || streaming_video == "" {
                 log.Fatal("Need to specify video and audio files for streaming")
             }
-            cfg.rtcbackup_cfg.streaming_video = load_ivf_video(&streaming_video)
+            if codec == "h264" {
+                cfg.rtcbackup_cfg.streaming_video = load_h264_video(&streaming_video)
+            } else {
+                cfg.rtcbackup_cfg.streaming_video = load_ivf_video(&streaming_video)
+            }
             cfg.rtcbackup_cfg.streaming_audio = load_ogg_audio(&streaming_audio)
         }
         cfg.rtcbackup = true

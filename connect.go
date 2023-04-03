@@ -464,11 +464,15 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
 
     iceConnected, iceConnectedCancel := context.WithCancel(context.Background())
 
-    video_codec := webrtc.MimeTypeH264
-    if *cfg.codec == "vp8" {
+    var video_codec string
+    if *cfg.codec == "h264" {
+        video_codec = webrtc.MimeTypeH264
+    } else if *cfg.codec == "vp8" {
         video_codec = webrtc.MimeTypeVP8
     } else if *cfg.codec == "vp9" {
         video_codec = webrtc.MimeTypeVP9
+    } else {
+        log.Fatal("Unknown codec type")
     }
 
 
