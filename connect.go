@@ -917,7 +917,11 @@ func sub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, sub_ur
             log.Fatal("Failed to marshal json data: ", err)
         }
 
-        client := &http.Client{}
+    tr := &http.Transport{
+        TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+    }
+     
+    client := &http.Client{Transport: tr}
         var sub *SubscribeResp
         req, err := http.NewRequest("POST", sub_url, bytes.NewBuffer(bs))
         if err != nil {
@@ -1154,9 +1158,13 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }()
     }
 
+    var sub_url string
+    if len(*cfg.viewer_url) > 0 {
     const subscribe_url_tpl string = "https://director%v.millicast.com/api/director/subscribe"
-    sub_url := fmt.Sprintf(subscribe_url_tpl, get_domain_suffix(cfg.viewer_url))
-
+        sub_url = fmt.Sprintf(subscribe_url_tpl, get_domain_suffix(cfg.viewer_url))
+    } else {
+        sub_url = *cfg.director_url
+    }
 
     for {
         var cs ConnectStats
@@ -1184,9 +1192,12 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         cs.HttpSubscribe = (float64(time.Since(now)))/1000000.0
 
         // we now visit wss url
-        conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
+        dialer := *websocket.DefaultDialer
+        dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+        
+        conn, _, err := dialer.Dial(wss_url.String(), nil)
         if err != nil {
-            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to connect websocket url: %v", wss_url.String())) {
+            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to connect websocket url: %v, %v", wss_url.String(), err)) {
                 return
             } else {
                 continue

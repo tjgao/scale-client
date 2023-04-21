@@ -79,6 +79,8 @@ type RtcBackupCfg struct {
 type AppCfg struct {
     // the url for viewers
     viewer_url *string
+    // director url
+    director_url *string
     // when the server turns inactive, the scale client can choose to wait the server side
     // to go back active, or simply quit the connection
     wait_on_inactive bool
@@ -307,7 +309,6 @@ func load_ogg_audio(f *string) []OggFrame {
     return oggFrames
 }
 
-
 func main() {
     if len(os.Args) < 2 {
         log.Info("Available subcommands: ws, rb. Please check the help: <program> <subcommand> -h")
@@ -338,6 +339,7 @@ func main() {
         rtcbackup = flag.NewFlagSet("rb", flag.ExitOnError)
 
         viewer_url string
+        director_url string
         wait_on_inactive bool
 
         ptkid uint64
@@ -371,6 +373,9 @@ func main() {
     }()
 
     ws.StringVar(&viewer_url, "url", "", "Viewer URL to access [ws]")
+    ws.StringVar(&director_url, "director_url", "", "Subscribing API URL")
+    ws.StringVar(&accountId, "account_id", "", "Specify the account id [ws]")
+    ws.StringVar(&streamName, "stream_name", "", "Specify the stream name [ws]")
     ws.BoolVar(&wait_on_inactive, "wait_on_inactive", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit [ws]")
 
     rtcbackup.Uint64Var(&ptkid, "ptoken_id", 0, "Specify the publish token id [rtcbackup]")
@@ -422,9 +427,15 @@ func main() {
         ws.Parse(os.Args[2:])
         cfg.wait_on_inactive = wait_on_inactive
         cfg.viewer_url = &viewer_url
+        cfg.director_url = &director_url
         if *cfg.viewer_url == "" {
-            log.Fatal("URL is not specified, exit")
-        }
+            if accountId == "" || streamName == "" || director_url == "" {
+                log.Fatal("URL is not specified, exit")
+            } else {
+                cfg.streamAccountId = accountId
+                cfg.streamName = streamName
+            }
+        }        
 
     default:
         log.Fatalf("Unknown subcommand '%s', please check the help info", os.Args[1])
@@ -479,16 +490,19 @@ func main() {
         }
         fmt.Print("---------------------------------------------------------------\n\n")
     } else {
-        // we extract account id and stream name from the url
-        m := parse(cfg.viewer_url)
-        if _, ok := m["streamAccountId"]; !ok {
-            log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
+        if *cfg.viewer_url != "" {
+            // we extract account id and stream name from the url
+            m := parse(cfg.viewer_url)
+            if _, ok := m["streamAccountId"]; !ok {
+                log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
+            }
+            if _, ok := m["streamName"]; !ok {
+                log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
+            }
+
+            cfg.streamAccountId = m["streamAccountId"]
+            cfg.streamName = m["streamName"]
         }
-        if _, ok := m["streamName"]; !ok {
-            log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
-        }
-        cfg.streamAccountId = m["streamAccountId"]
-        cfg.streamName = m["streamName"]
     }
 
     if logfile != "" {
