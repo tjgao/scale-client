@@ -1,23 +1,24 @@
 package main
 
 import (
-    "bytes"
-    b64 "encoding/base64"
-    "encoding/binary"
-    "flag"
-    "fmt"
-    "crypto/hmac"
-    "crypto/sha256"
-    "encoding/json"
-    "math/rand"
-    "net/http"
-    "os"
-    "io"
-    "errors"
-    "regexp"
-    "strings"
-    "sync"
-    "time"
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	b64 "encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"math/rand"
+	"net/http"
+	"net/url"
+	"os"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v3/pkg/media/h264reader"
 	"github.com/pion/webrtc/v3/pkg/media/ivfreader"
@@ -463,7 +464,7 @@ func main() {
 
         // we should have enough information to figure out the view url, it is printed out for convenience
         check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v&token=%v"
-        special_rtcbackup_name := generate_rtcbackup_name(cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id, &cfg.streamName)
+        special_rtcbackup_name := url.QueryEscape(generate_rtcbackup_name(cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id, &cfg.streamName))
         check_url := fmt.Sprintf(check_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.streamAccountId, special_rtcbackup_name, *cfg.rtcbackup_cfg.stoken);
         fmt.Println("\n---------------------------------------------------------------")
         fmt.Println("View URL:")
