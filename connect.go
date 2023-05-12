@@ -72,6 +72,7 @@ type RunningState struct {
     offer      *webrtc.SessionDescription
     connecting atomic.Bool
     conn_exit  chan struct{}
+    conn_ch    chan bool         // this is to notify stats goroutine the state of connection
     close_conn func()
 }
 
@@ -342,13 +343,26 @@ func stats_read(cfg *AppCfg, st *RunningState) {
     last_stats := map[webrtc.SSRC]stats.InboundRTPStreamStats{}
     pc := st.pc
     g := st.g
+    var connected bool
     for {
         select {
         case <- st.conn_exit:
             pc.Close()
-            ldebug(st.cid, "stats report goroutine exit, notified by conn_exit")
+            ldebug(st.LocalUser, "stats report goroutine exit, notified by conn_exit")
             return
+        case conn_state := <- st.conn_ch:
+            if connected && !conn_state {
+                // we are now disconnected, so the last stats data is discarded 
+                last_stats = make(map[webrtc.SSRC]stats.InboundRTPStreamStats)
+                ldebug(st.LocalUser, "stats report goroutine paused, notified by conn_ch")
+            }  else if !connected && conn_state {
+                ldebug(st.LocalUser, "stats report goroutine continue, notified by conn_ch")
+            }
+            connected = conn_state
         case <-time.After(time.Second * time.Duration(stats_report_interval)):
+            if !connected {
+                continue
+            }
             ts := pc.GetTransceivers()
             rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
             rpt += fmt.Sprintf(", \"TestName\":\"%v\"", *cfg.test_name)
@@ -391,11 +405,32 @@ func stats_read(cfg *AppCfg, st *RunningState) {
                     bitrate := float64(0)
                     if ok {
                         packets_lost := float64(r.InboundRTPStreamStats.PacketsLost - last.PacketsLost)
+                        if packets_lost < 0 {
+                            packets_lost = 0
+                        }
                         packets_received := float64(r.InboundRTPStreamStats.PacketsReceived - last.PacketsReceived)
-                        packets_loss_percentage = 100.0 * packets_lost / packets_received
+                        if packets_received < 0 {
+                            packets_received = 0
+                        }
+                        if packets_received != 0 {
+                            packets_loss_percentage = 100.0 * packets_lost / packets_received
+                        } else {
+                            packets_loss_percentage = 0.0
+                        }
+                        if packets_loss_percentage > 100.0 {
+                            // sometimes it happens, the lost packets is a little bit bigger than received packets
+                            packets_loss_percentage = 100.0
+                        }
                         bytes_received := float64(r.InboundRTPStreamStats.BytesReceived - last.BytesReceived)
+                        if bytes_received < 0 {
+                            bytes_received = 0
+                        }
                         time_diff := float64(r.InboundRTPStreamStats.LastPacketReceivedTimestamp.Sub(last.LastPacketReceivedTimestamp).Seconds())
-                        bitrate = (8 * bytes_received / time_diff) / 1024.0
+                        if time_diff > 0 {
+                            bitrate = (8 * bytes_received / time_diff) / 1024.0
+                        } else {
+                            bitrate = 0.0
+                        }
                     }
                     o += fmt.Sprintf(", \"PacketLossPercentage\":%.2f", packets_loss_percentage)
                     o += fmt.Sprintf(", \"Bitrate\":%.2f", bitrate)
@@ -516,7 +551,7 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
             case <- ticker.C:
                 frame := cfg.rtcbackup_cfg.streaming_video.Frames[idx]
                 if ivfErr := videoTrack.WriteSample(media.Sample{Data:frame, Duration:time.Second}); ivfErr != nil {
-                    linfo(st.cid, "Failed to send video rtp: ", ivfErr)
+                    linfo(st.LocalUser, "Failed to send video rtp: ", ivfErr)
                     st.close_conn()
                     close(video_done)
                     return
@@ -563,7 +598,7 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
                 lastGranu = f.granu
                 sampleDuration := time.Duration((sampleCount/48000)*1000) * time.Millisecond
                 if oggErr := audioTrack.WriteSample(media.Sample{Data:f.frame, Duration:sampleDuration}); oggErr != nil {
-                    linfo(st.cid, "Failed to send audio rtp: ", oggErr)
+                    linfo(st.LocalUser, "Failed to send audio rtp: ", oggErr)
                     st.close_conn()
                     close(audio_done)
                     return
@@ -584,16 +619,16 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
     }()
 
     pc.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState){
-        ldebug(st.cid, "streaming ice connection state changed to ", connectionState)
+        ldebug(st.LocalUser, "streaming ice connection state changed to ", connectionState)
         if connectionState == webrtc.ICEConnectionStateConnected {
             iceConnectedCancel()
         }
     })
 
     pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState){
-        ldebug(st.cid, "streaming peer connection state changed to ", s)
+        ldebug(st.LocalUser, "streaming peer connection state changed to ", s)
         if s == webrtc.PeerConnectionStateFailed {
-            lerror(st.cid, "peer connection switched to failed")
+            lerror(st.LocalUser, "peer connection switched to failed")
             pc.Close()
         }
     })
@@ -627,10 +662,10 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
     dtlsConnected := false
     firstRTPReceived := false
     pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-        ldebug(st.cid, "ice connection state changed to ", state)
+        ldebug(st.LocalUser, "ice connection state changed to ", state)
         ice_state = state
         if ice_state == webrtc.ICEConnectionStateFailed {
-            lerror(st.cid, "ice connection failed, close peerconnection")
+            lerror(st.LocalUser, "ice connection failed, close peerconnection")
             pc.Close()
             st.close_conn()
         }
@@ -643,10 +678,18 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
 
 
     pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-        ldebug(st.cid, "connection state switched to ", state)
+        ldebug(st.LocalUser, "connection state switched to ", state)
+
+        if conn_state == webrtc.PeerConnectionStateConnected && state != webrtc.PeerConnectionStateConnected {
+            st.conn_ch <- false
+        }
+        if conn_state != webrtc.PeerConnectionStateConnected && state == webrtc.PeerConnectionStateConnected {
+            st.conn_ch <- true
+        }
+
         conn_state = state
         if conn_state == webrtc.PeerConnectionStateFailed {
-            lerror(st.cid, "connection failed, close peerconnection")
+            lerror(st.LocalUser, "connection failed, close peerconnection")
             pc.Close()
             st.close_conn()
         }
@@ -663,7 +706,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
             for {
                 _, _, err := tr.Read(rtp_buf)
                 if err != nil {
-                    ldebug(st.cid, fmt.Sprintf("RTP read goroutine for %v: %v exit", tr.Kind().String(), tr.SSRC()))
+                    ldebug(st.LocalUser, fmt.Sprintf("RTP read goroutine for %v: %v exit", tr.Kind().String(), tr.SSRC()))
                     break
                 }
                 if (!firstRTPReceived) {
@@ -687,7 +730,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
             for {
                 _, _, err := rc.Read(rtcp_buf)
                 if err != nil {
-                    ldebug(st.cid, fmt.Sprintf("RTCP read goroutine for %v: %v exit", rc.Track().Kind().String(), rc.Track().SSRC()))
+                    ldebug(st.LocalUser, fmt.Sprintf("RTCP read goroutine for %v: %v exit", rc.Track().Kind().String(), rc.Track().SSRC()))
                     break
                 }
             }
@@ -778,10 +821,10 @@ func receive_streaming_direct(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo
     }
 
     ice_transport.OnConnectionStateChange(func(state webrtc.ICETransportState) {
-        ldebug(st.cid, "ICE state changed to ", state)
+        ldebug(st.LocalUser, "ICE state changed to ", state)
     })
     ice_transport.OnSelectedCandidatePairChange(func(p *webrtc.ICECandidatePair) {
-        ldebug(st.cid, "ICE candidate pair changed ", p)
+        ldebug(st.LocalUser, "ICE candidate pair changed ", p)
     })
 
     iceRole := webrtc.ICERoleControlling
@@ -791,7 +834,7 @@ func receive_streaming_direct(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo
     }
 
     dtls_transport.OnStateChange(func(state webrtc.DTLSTransportState) {
-        ldebug(st.cid, "DTLS state changed to ", state)
+        ldebug(st.LocalUser, "DTLS state changed to ", state)
     })
 
     err = dtls_transport.Start(webrtc.DTLSParameters{Role: webrtc.DTLSRoleServer,
@@ -805,7 +848,7 @@ func receive_streaming_direct(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo
         panic(err)
     }
 
-    ldebug(st.cid, "Connection is working")
+    ldebug(st.LocalUser, "Connection is working")
 }
 
 func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool {
@@ -813,17 +856,17 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
     err := json.Unmarshal(buf, &ev)
     if err != nil {
         // even though we received some weird json, we are staying
-        lerror(st.cid, "Failed to unmarshal received json: ", string(buf))
+        lerror(st.LocalUser, "Failed to unmarshal received json: ", string(buf))
         return true
     }
 
     var info *AnswerSDPInfo = nil
     if e, ok := ev["type"]; !ok {
-        lerror(st.cid, "Unrecognized json: ", string(buf))
+        lerror(st.LocalUser, "Unrecognized json: ", string(buf))
     } else {
         if e == "response" {
             if data, ok := ev["data"]; !ok {
-                lerror(st.cid, "Found no data in the response json: ", string(buf))
+                lerror(st.LocalUser, "Found no data in the response json: ", string(buf))
                 return false
             } else {
                 if info == nil {
@@ -831,7 +874,7 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
                     sdp := m["sdp"].(string)
                     info = readAnswerSDP(sdp)
                     if info == nil {
-                        lerror(st.cid, "Failed to extract all info from sdp")
+                        lerror(st.LocalUser, "Failed to extract all info from sdp")
                         return false
                     }
                 }
@@ -840,24 +883,24 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
             }
         } else {
             if n, ok := ev["name"]; !ok {
-                lerror(st.cid, "No name for this event: ", string(buf))
+                lerror(st.LocalUser, "No name for this event: ", string(buf))
             } else {
                 if n == "stopped" {
-                    linfo(st.cid, fmt.Sprintf("Server stopped streaming: %v", string(buf)))
+                    linfo(st.LocalUser, fmt.Sprintf("Server stopped streaming: %v", string(buf)))
                     return false
                 } else if n == "inactive" {
                     // This means the server temporarily pauses streaming
                     // but as long as the DTLS connection is still alive, we do not need to do anything
                     // because when server starts streaming again,  DTLS conn will just work
-                    // linfo(st.cid, "Server is inactive")
+                    // linfo(st.LocalUser, "Server is inactive")
                     // if wait_on_inactive is true, we'll stay
-                    ldebug(st.cid, "Server is inactive")
+                    ldebug(st.LocalUser, "Server is inactive")
                     return cfg.wait_on_inactive
                 } else if n == "active" {
                     /// This means the server continues streaming
-                    // linfo(st.cid, "Server is active")
+                    // linfo(st.LocalUser, "Server is active")
                 } else {
-                    // ldebug(st.cid, "Received ws message: ", string(buf))
+                    // ldebug(st.LocalUser, "Received ws message: ", string(buf))
                 }
             }
         }
@@ -878,12 +921,12 @@ func get_fingerprint(cert tls.Certificate) string {
     return buf.String()
 }
 
-func keep_trying(cid int, retry *int64, msg string) bool {
-    lerror(cid, msg)
+func keep_trying(user *string, retry *int64, msg string) bool {
+    lerror(user, msg)
     if *retry == 0 {
         return false
     } else if *retry > 0 {
-        linfo(cid, "Try reconnecting")
+        linfo(user, "Try reconnecting")
         *retry--
     }
 
@@ -909,7 +952,7 @@ func create_state(cid int, cfg *AppCfg) *RunningState {
 }
 
 
-func sub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, sub_url string) (bool, *SubscribeResp) {
+func sub_request(localUser *string, state *RunningState, cfg *AppCfg, retry *int64, sub_url string) (bool, *SubscribeResp) {
         // we now send json request to the subscribe url
         var reqJson = ReqJson{StreamAccountId: cfg.streamAccountId, StreamName: cfg.streamName}
         bs, err := json.Marshal(&reqJson)
@@ -921,7 +964,7 @@ func sub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, sub_ur
         var sub *SubscribeResp
         req, err := http.NewRequest("POST", sub_url, bytes.NewBuffer(bs))
         if err != nil {
-            if !keep_trying(cid, retry, "") {
+            if !keep_trying(localUser, retry, "") {
                 return false, nil
             } else {
                 return true, nil
@@ -961,7 +1004,7 @@ func sub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, sub_ur
             break
         }
         if sub == nil {
-            if !keep_trying(cid, retry, "Failed to decode json returned from server") {
+            if !keep_trying(localUser, retry, "Failed to decode json returned from server") {
                 return false, nil
             } else {
                 return true, nil
@@ -984,7 +1027,7 @@ func rtcbackup_request(st *RunningState, url string, token *string, sdp *string)
     // send rtcbackup post request with the token
     req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(*sdp)))
     if err != nil {
-        lerror(st.cid, "Failed to create HTTP post object: ", err);
+        lerror(st.LocalUser, "Failed to create HTTP post object: ", err);
         return nil
     }
     req.Header.Add("Authorization", "Bearer " + *token)
@@ -992,13 +1035,13 @@ func rtcbackup_request(st *RunningState, url string, token *string, sdp *string)
     client := &http.Client{}
     resp, err := client.Do(req)
     if err != nil {
-        linfo(st.cid, fmt.Sprintf("Failed to post offer sdp to %v, err: %v", url, err))
+        linfo(st.LocalUser, fmt.Sprintf("Failed to post offer sdp to %v, err: %v", url, err))
         return nil
     }
     body, err := ioutil.ReadAll(resp.Body)
     answer := string(body)
     if resp.StatusCode != 201 {
-        linfo(st.cid, "Server returned status code:", resp.StatusCode, ", error: ", answer)
+        linfo(st.LocalUser, "Server returned status code:", resp.StatusCode, ", error: ", answer)
         return nil
     }
     return &answer
@@ -1093,7 +1136,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         now := time.Now()
         answer := rtcbackup_request(state, rtc_url, &token, &state.offer.SDP)
         if answer == nil {
-            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to POST offer sdp")) {
+            if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to POST offer sdp")) {
                 return
             } else {
                 continue
@@ -1102,6 +1145,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         cs.HttpSubscribe = (float64(time.Since(now)))/1000000.0
 
 
+        state.conn_ch = make(chan bool)
         state.conn_exit = make(chan struct{})
         var cc sync.Once
         state.close_conn = func() {
@@ -1119,13 +1163,13 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         <-state.conn_exit
         state.pc.Close()
 
-        ldebug(cid, "Connection is completely closed")
+        ldebug(state.LocalUser, "Connection is completely closed")
         if retry == 0 {
             break
         } else if retry < 0 {
             // If retry is negative, it will retry forever
         } else {
-            linfo(cid, "Connection is recreated!")
+            linfo(state.LocalUser, "Connection is recreated!")
             retry--
         }
     }
@@ -1163,7 +1207,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         cs.UserID = state.LocalUser
         cs.TestName = *cfg.test_name
         now := time.Now()
-        ok, sub := sub_request(cid, state, cfg, &retry, sub_url)
+        ok, sub := sub_request(&state.LocalUser, state, cfg, &retry, sub_url)
         if !ok {
             break
         } else if sub == nil {
@@ -1173,7 +1217,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
 
         if err != nil {
-            if !keep_trying(cid, &retry, fmt.Sprintf("The wss url seems to be invalid: %v", err)) {
+            if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("The wss url seems to be invalid: %v", err)) {
                 return
             } else {
                 continue
@@ -1186,7 +1230,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         // we now visit wss url
         conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
         if err != nil {
-            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to connect websocket url: %v", wss_url.String())) {
+            if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to connect websocket url: %v", wss_url.String())) {
                 return
             } else {
                 continue
@@ -1216,7 +1260,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
         bs, err := json.Marshal(&cmd)
         if err != nil {
-            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to marshal json data: %v", err)) {
+            if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to marshal json data: %v", err)) {
                 return
             } else {
                 continue
@@ -1226,7 +1270,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         // Send view command
         err = conn.WriteMessage(websocket.TextMessage, bs)
         if err != nil {
-            if !keep_trying(cid, &retry, fmt.Sprintf("Failed to send sdp via websocket connection: %v", err)) {
+            if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to send sdp via websocket connection: %v", err)) {
                 return
             } else {
                 continue
@@ -1234,6 +1278,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }
 
 
+        state.conn_ch = make(chan bool)
         state.conn_exit = make(chan struct{})
         var cc sync.Once
         state.close_conn = func() {
@@ -1246,20 +1291,20 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             for {
                 t, buf, err := conn.ReadMessage()
                 if err != nil {
-                    lerror(cid, "Failed to read message from websocket: ", err)
+                    lerror(state.LocalUser, "Failed to read message from websocket: ", err)
                     conn.Close()
-                    linfo(cid, "Connection task exit due to websocket error")
+                    linfo(state.LocalUser, "Connection task exit due to websocket error")
                     break
                 }
                 if t == websocket.TextMessage {
                     if !on_event(cfg, state, &cs, buf) {
                         conn.Close()
-                        linfo(cid, "Connection task exit")
+                        linfo(state.LocalUser, "Connection task exit")
                         break
                     }
                 } else {
                     // we recieved binary
-                    ldebug(cid, "Received binary data message")
+                    ldebug(state.LocalUser, "Received binary data message")
                 }
             }
             state.close_conn()
@@ -1267,14 +1312,14 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         <-state.conn_exit
 
-        ldebug(cid, "Connection is completely closed")
+        ldebug(state.LocalUser, "Connection is completely closed")
 
         if retry == 0 {
             break
         } else if retry < 0 {
             // If retry is negative, it will retry forever
         } else {
-            linfo(cid, "Connection is recreated!")
+            linfo(state.LocalUser, "Connection is recreated!")
             retry--
         }
     }
