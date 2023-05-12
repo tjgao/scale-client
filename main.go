@@ -51,32 +51,6 @@ type OggFrame struct {
     granu uint64
 }
 
-type RtcBackupCfg struct {
-    // sub token id
-    stoken_id uint64
-    // pub token id
-    ptoken_id uint64
-    // sub token
-    stoken *string
-    // pub token
-    ptoken *string
-    // platform
-    platform *string
-    // appId
-    appId string
-    // appKey
-    appKey string
-    // streaming or viewing?
-    streaming bool
-    // one on one
-    one_on_one bool
-    // streaming video data
-    streaming_video *VideoData
-    // streaming audio data
-    streaming_audio []OggFrame
-
-}
-
 type AppCfg struct {
     // the url for viewers
     viewer_url *string
@@ -102,8 +76,29 @@ type AppCfg struct {
     streamName string
     // rtcbackup endpoint?
     rtcbackup bool
-    // rtcbackup cfg
-    rtcbackup_cfg RtcBackupCfg
+
+    // sub token id
+    stoken_id uint64
+    // pub token id
+    ptoken_id uint64
+    // sub token
+    stoken *string
+    // pub token
+    ptoken *string
+    // platform
+    platform *string
+    // appId
+    appId string
+    // appKey
+    appKey string
+    // streaming or viewing?
+    streaming bool
+    // one on one
+    one_on_one bool
+    // streaming video data
+    streaming_video *VideoData
+    // streaming audio data
+    streaming_audio []OggFrame
 }
 
 type send_stats_func func([]byte, string)
@@ -309,6 +304,23 @@ func load_ogg_audio(f *string) []OggFrame {
 }
 
 
+func create_app_id_key(cfg *AppCfg) {
+    if *cfg.stoken == "" || cfg.stoken_id == 0 || *cfg.ptoken == "" || cfg.ptoken_id == 0 {
+        log.Fatal("Must specify pub/sub token and token id")
+    }
+
+    if cfg.streamAccountId == "" || cfg.streamName == "" {
+        log.Fatal("Must specify accountId/streamName")
+    }
+    // we calculate appId and appKey here as this only needs to be done once
+    // but later we'll use them to generate jwt token for each connection as that has a timing effect (expire in some time)
+    cfg.appId = generate_appid(cfg.streamAccountId, cfg.ptoken_id, cfg.stoken_id)
+    cfg.appKey = generate_appkey(cfg.ptoken, cfg.stoken)
+}
+
+
+var printed_view_url bool
+
 func main() {
     if len(os.Args) < 2 {
         log.Info("Available subcommands: ws, rb. Please check the help: <program> <subcommand> -h")
@@ -355,81 +367,91 @@ func main() {
     )
 
     // setup common flags
-    func() {
-        for _, fs := range []*flag.FlagSet{ws, rtcbackup} {
-            fs.StringVar(&test_name, "name", "", "Name of the test")
-            fs.StringVar(&codec, "codec", "h264", "Codec used by remote side. Valid options are h264, vp8 and vp9.")
-            fs.IntVar(&num, "num", 1, "Number of connections")
-            fs.StringVar(&logLevel, "level", "info", "Specify log level, available levels are: panic, error, warn, info and debug.")
-            fs.StringVar(&logfile, "logfile", "", "Log file path, log output goes to log file instead of console.")
-            fs.BoolVar(&pion_dbg, "dbg", false, "Turn on pion debug so that more internal info will be printed out.")
-            fs.Uint64Var(&connecting_time, "connecting_time", 0, "All the connections will be evenly distributed in the time (seconds) to avoid burst connections.")
-            fs.Uint64Var(&max_connecting, "max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0. It will disable connecting_time if set.")
-            fs.Int64Var(&report_interval, "report_interval", 10, "The stats report interval.")
-            fs.StringVar(&stats_dst, "report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
-            fs.Int64Var(&retry_times, "retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times, default value is 0. If a negative value is provided, it retries forever.`)
-        }
-    }()
+    for _, fs := range []*flag.FlagSet{ws, rtcbackup} {
+        fs.StringVar(&test_name, "name", "", "Name of the test")
+        fs.StringVar(&codec, "codec", "h264", "Codec used by remote side. Valid options are h264, vp8 and vp9.")
+        fs.IntVar(&num, "num", 1, "Number of connections")
+        fs.StringVar(&logLevel, "level", "info", "Specify log level, available levels are: panic, error, warn, info and debug.")
+        fs.StringVar(&logfile, "logfile", "", "Log file path, log output goes to log file instead of console.")
+        fs.BoolVar(&pion_dbg, "dbg", false, "Turn on pion debug so that more internal info will be printed out.")
+        fs.Uint64Var(&connecting_time, "connecting_time", 0, "All the connections will be evenly distributed in the time (seconds) to avoid burst connections.")
+        fs.Uint64Var(&max_connecting, "max_connecting", 0, "Specify the maximum number of connecting attempts, no limit if set to 0. It will disable connecting_time if set.")
+        fs.Int64Var(&report_interval, "report_interval", 10, "The stats report interval.")
+        fs.StringVar(&stats_dst, "report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
+        fs.Int64Var(&retry_times, "retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times, default value is 0. If a negative value is provided, it retries forever.`)
+
+        fs.StringVar(&accountId, "account_id", "", "Specify the account id")
+        fs.StringVar(&streamName, "stream_name", "", "Specify the stream name")
+
+        fs.BoolVar(&streaming, "streaming", false, "The client will act as a streaming client instead of a viewer if this is on, video/audio files are required.")
+        fs.StringVar(&streaming_video, "streaming_video", "", "Streaming video file")
+        fs.StringVar(&streaming_audio, "streaming_audio", "", "Streaming audio file")
+        fs.StringVar(&ptoken, "ptoken", "", "Specify the publish token")
+
+        fs.StringVar(&platform, "platform", "dev", "It can be 'dev', 'staging' or 'production'")
+    }
 
     ws.StringVar(&viewer_url, "url", "", "Viewer URL to access [ws]")
     ws.BoolVar(&wait_on_inactive, "wait_on_inactive", false, "A boolean flag, if set, the program will wait when server turns inactive, otherwise just exit [ws]")
 
-    rtcbackup.Uint64Var(&ptkid, "ptoken_id", 0, "Specify the publish token id [rtcbackup]")
-    rtcbackup.Uint64Var(&stkid, "stoken_id", 0, "Specify the subscribe token id [rtcbackup]")
-    rtcbackup.StringVar(&ptoken, "ptoken", "", "Specify the publish token [rtcbackup]")
-    rtcbackup.StringVar(&stoken, "stoken", "", "Specify the subscribe token [rtcbackup]")
-    rtcbackup.StringVar(&accountId, "account_id", "", "Specify the account id [rtcbackup]")
-    rtcbackup.StringVar(&streamName, "stream_name", "", "Specify the stream name [rtcbackup]")
-    rtcbackup.StringVar(&platform, "platform", "dev", "It can be 'dev', 'staging' or 'production' [rtcbackup]")
-    rtcbackup.BoolVar(&streaming, "streaming", false, "The client will act as a streaming client instead of a viewer if this is on, video/audio files are required [rtcbackup]")
-    rtcbackup.StringVar(&streaming_video, "streaming_video", "", "Streaming video file [rtcbackup]")
-    rtcbackup.StringVar(&streaming_audio, "streaming_audio", "", "Streaming audio file [rtcbackup]")
     rtcbackup.BoolVar(&one_on_one, "one_on_one", false, "This flag is used with rtcbacup viewers. Instead of adding all these viewers to one stream, this flag will make each viewer subscribe a different stream. The rule is similar to rtcbackup streaming. [rtcbackup]")
+    rtcbackup.Uint64Var(&ptkid, "ptoken_id", 0, "Specify the publish token id. It is needed in streaming mode [rtcbackup]")
+    rtcbackup.Uint64Var(&stkid, "stoken_id", 0, "Specify the subscribe token id [rtcbackup]")
+    rtcbackup.StringVar(&stoken, "stoken", "", "Specify the subscribe token [rtcbacup]")
 
     var cfg AppCfg
 
     switch os.Args[1] {
     case "rb":
         rtcbackup.Parse(os.Args[2:])
-        cfg.rtcbackup_cfg.ptoken = &ptoken
-        cfg.rtcbackup_cfg.stoken = &stoken
-        cfg.rtcbackup_cfg.ptoken_id = ptkid
-        cfg.rtcbackup_cfg.stoken_id = stkid
-        cfg.rtcbackup_cfg.platform = &platform
-        cfg.rtcbackup_cfg.one_on_one = one_on_one
-        if *cfg.rtcbackup_cfg.platform == "production" {
-            *cfg.rtcbackup_cfg.platform = ""
-        } else if *cfg.rtcbackup_cfg.platform != "dev" && *cfg.rtcbackup_cfg.platform != "staging" {
-            log.Fatalf("Unknown platform: %s", *cfg.rtcbackup_cfg.platform)
-        } else {
-            *cfg.rtcbackup_cfg.platform = "-" + *cfg.rtcbackup_cfg.platform
-        }
-        cfg.streamAccountId = accountId
-        cfg.streamName = streamName
-        cfg.rtcbackup_cfg.streaming = streaming
-        if streaming {
-            if streaming_audio == "" || streaming_video == "" {
-                log.Fatal("Need to specify video and audio files for streaming")
-            }
-            if codec == "h264" {
-                cfg.rtcbackup_cfg.streaming_video = load_h264_video(&streaming_video)
-            } else {
-                cfg.rtcbackup_cfg.streaming_video = load_ivf_video(&streaming_video)
-            }
-            cfg.rtcbackup_cfg.streaming_audio = load_ogg_audio(&streaming_audio)
-        }
+        cfg.one_on_one = one_on_one
         cfg.rtcbackup = true
     case "ws":
         ws.Parse(os.Args[2:])
         cfg.wait_on_inactive = wait_on_inactive
         cfg.viewer_url = &viewer_url
-        if *cfg.viewer_url == "" {
-            log.Fatal("URL is not specified, exit")
+        if streaming {
+            if ptoken == "" {
+                log.Fatal("Must specify publish token for ws stream publishing!")
+            }
+        } else {
+            if viewer_url == "" {
+                log.Fatal("URL is not specified, exit")
+            }
         }
 
     default:
         log.Fatalf("Unknown subcommand '%s', please check the help info", os.Args[1])
     }
+
+    cfg.ptoken = &ptoken
+    cfg.stoken = &stoken
+    cfg.ptoken_id = ptkid
+    cfg.stoken_id = stkid
+    cfg.platform = &platform
+    if *cfg.platform == "production" {
+        *cfg.platform = ""
+    } else if *cfg.platform != "dev" && *cfg.platform != "staging" {
+        log.Fatalf("Unknown platform: %s", *cfg.platform)
+    } else {
+        *cfg.platform = "-" + *cfg.platform
+    }
+    cfg.streamAccountId = accountId
+    cfg.streamName = streamName
+    cfg.streaming = streaming
+
+    if streaming {
+        if streaming_audio == "" || streaming_video == "" {
+            log.Fatal("Need to specify video and audio files for streaming")
+        }
+        if codec == "h264" {
+            cfg.streaming_video = load_h264_video(&streaming_video)
+        } else {
+            cfg.streaming_video = load_ivf_video(&streaming_video)
+        }
+        cfg.streaming_audio = load_ogg_audio(&streaming_audio)
+    }
+
 
     cfg.codec = &codec
     cfg.pion_dbg = pion_dbg
@@ -450,46 +472,43 @@ func main() {
     rand.Seed(time.Now().UnixNano())
 
     if cfg.rtcbackup {
-        if *cfg.rtcbackup_cfg.stoken == "" || cfg.rtcbackup_cfg.stoken_id == 0 || *cfg.rtcbackup_cfg.ptoken == "" || cfg.rtcbackup_cfg.ptoken_id == 0 {
-            log.Fatal("Must specify pub/sub token and token id")
-        }
-
-        if cfg.streamAccountId == "" || cfg.streamName == "" {
-            log.Fatal("Must specify accountId/streamName")
-        }
-        // we calculate appId and appKey here as this only needs to be done once
-        // but later we'll use them to generate jwt token for each connection as that has a timing effect (expire in some time)
-        cfg.rtcbackup_cfg.appId = generate_appid(cfg.streamAccountId, cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id)
-        cfg.rtcbackup_cfg.appKey = generate_appkey(cfg.rtcbackup_cfg.ptoken, cfg.rtcbackup_cfg.stoken)
-
+        create_app_id_key(&cfg)
         // we should have enough information to figure out the view url, it is printed out for convenience
         check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v&token=%v"
-        special_rtcbackup_name := url.QueryEscape(generate_rtcbackup_name(cfg.rtcbackup_cfg.ptoken_id, cfg.rtcbackup_cfg.stoken_id, &cfg.streamName))
-        check_url := fmt.Sprintf(check_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.streamAccountId, special_rtcbackup_name, *cfg.rtcbackup_cfg.stoken);
+        special_rtcbackup_name := url.QueryEscape(generate_rtcbackup_name(cfg.ptoken_id, cfg.stoken_id, &cfg.streamName))
+        check_url := fmt.Sprintf(check_url_tpl, *cfg.platform, cfg.streamAccountId, special_rtcbackup_name, *cfg.stoken);
         fmt.Println("\n---------------------------------------------------------------")
         fmt.Println("View URL:")
         fmt.Println(check_url)
         fmt.Println()
         if num > 1 && streaming {
-            //
             fmt.Println(fmt.Sprintf("%v streamings have been created, you can watch all the streamings by adding numbers[%v-%v] to the original streamId. For example, \"streamId=MyId/aTuO.zXy.stream\" -> \"streamId=MyId/aTuO.zXy.stream1\"", num, 1, num-1))
-            // for i := 1; i < num; i++ {
-            //     check_url = fmt.Sprintf(check_url_tpl, *cfg.rtcbackup_cfg.platform, cfg.streamAccountId, special_rtcbackup_name + strconv.Itoa(i), *cfg.rtcbackup_cfg.stoken)
-            //     fmt.Println(check_url)
-            // }
         }
         fmt.Print("---------------------------------------------------------------\n\n")
     } else {
-        // we extract account id and stream name from the url
-        m := parse(cfg.viewer_url)
-        if _, ok := m["streamAccountId"]; !ok {
-            log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
+        if cfg.streaming {
+            // For ws, assume account id is xxYxx, stream name is s
+            // The rule is simple: https://viewer<platform>.millicast.com?streamId=xxYxx/s 
+            // But ws stream publishing does not need stream account id, client can find it by talking to servers
+            // so we cannot print out the view url now, we'll print it out later
+            if *cfg.ptoken == "" {
+                log.Fatal("Need to specify publish token for websocket stream publishing")
+            }
+
+        } else {
+            // we extract account id and stream name from the url
+            m := parse(cfg.viewer_url)
+            if _, ok := m["streamAccountId"]; !ok {
+                log.Fatal("Failed to extract streamAccountId from URL: ", *cfg.viewer_url)
+            }
+            if _, ok := m["streamName"]; !ok {
+                log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
+            }
+            cfg.streamAccountId = m["streamAccountId"]
+            cfg.streamName = m["streamName"]
+            p := get_domain_suffix(cfg.viewer_url)
+            cfg.platform = &p
         }
-        if _, ok := m["streamName"]; !ok {
-            log.Fatal("Failed to extract streamName from URL: ", *cfg.viewer_url)
-        }
-        cfg.streamAccountId = m["streamAccountId"]
-        cfg.streamName = m["streamName"]
     }
 
     if logfile != "" {

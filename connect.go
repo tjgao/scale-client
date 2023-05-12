@@ -37,16 +37,23 @@ import (
 
 const MAX_RTP_LEN = 2000
 
-type ReqJson struct {
+type SubReqJson struct {
     StreamAccountId string `json:"streamAccountId"`
     StreamName      string `json:"streamName"`
 }
 
-type SubscribeResp struct {
-    Url        string
-    Jwt        string
-    IceServers []webrtc.ICEServer
+type PubReqJson struct {
+    StreamName    string `json:"streamName"`
+    StreamType    string `json:"streamType"`
 }
+
+type PubSubResp struct {
+    Url              string
+    Jwt              string
+    StreamAccountId  string
+    IceServers       []webrtc.ICEServer
+}
+
 
 type TransCommand struct {
     Type    string                 `json:"type"`
@@ -66,7 +73,7 @@ type RunningState struct {
     Cert       webrtc.Certificate // local cert
     LocalUser  string             // ice user
     LocalPwd   string             // ice pwd
-    SubResp    *SubscribeResp     // subscribe response
+    Resp       *PubSubResp        // publish/subscribe response
     pc         *webrtc.PeerConnection
     g          *stats.Getter
     offer      *webrtc.SessionDescription
@@ -79,7 +86,7 @@ type RunningState struct {
 type ConnectStats struct {
     UserID string                `json:"userId"`
     TestName string              `json:"TestName"`
-    HttpSubscribe float64        `json:"httpSubscribe"`
+    HttpPubSub float64        `json:"httpSubscribe"`
     ICESetup float64             `json:"iceSetup"`
     DTLSSetup float64            `json:"dtlsSetup"`
     FirstRTP float64             `json:"firstRTP"`
@@ -102,7 +109,7 @@ func ldebug(args ...interface{}) {
 }
 
 
-func addIceServer(o interface{}, sub *SubscribeResp) {
+func addIceServer(o interface{}, sub *PubSubResp) {
     var ice webrtc.ICEServer
     m := o.(map[string]interface{})
     if u, ok := m["urls"]; ok {
@@ -126,8 +133,8 @@ func addIceServer(o interface{}, sub *SubscribeResp) {
     sub.IceServers = append(sub.IceServers, ice)
 }
 
-func check_result(result map[string]interface{}) *SubscribeResp {
-    var sub SubscribeResp
+func check_resp_result(result map[string]interface{}) *PubSubResp {
+    var resp PubSubResp
     if status, ok := result["status"]; !ok || status != "success" {
         log.Error("The response status is not 'success', it is ", status)
         return nil
@@ -137,29 +144,34 @@ func check_result(result map[string]interface{}) *SubscribeResp {
         data := d.(map[string]interface{})
 
         if j, ok := data["jwt"]; ok {
-            sub.Jwt = j.(string)
+            resp.Jwt = j.(string)
         } else {
             log.Error("Found no jwt in json")
             return nil
         }
         if u, ok := data["wsUrl"]; ok {
-            sub.Url = u.(string)
+            resp.Url = u.(string)
         } else {
             log.Error("Found no wsUrl in json")
             return nil
         }
+        if s, ok := data["streamAccountId"]; ok {
+            resp.StreamAccountId = s.(string)
+        }
+
         if m, ok := data["iceServers"]; ok {
             mm := m.([]interface{})
             for _, i := range mm {
-                addIceServer(i, &sub)
+                addIceServer(i, &resp)
             }
         } else {
             log.Debug("Found no ice servers in json")
         }
     }
 
-    return &sub
+    return &resp
 }
+
 
 func convertTypeFromICE(t ice.CandidateType) (webrtc.ICECandidateType, error) {
     switch t {
@@ -542,14 +554,14 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
     go func() {
         <- iceConnected.Done()
 
-        ticker := time.NewTicker(cfg.rtcbackup_cfg.streaming_video.Interval)
+        ticker := time.NewTicker(cfg.streaming_video.Interval)
         // we loop forever
         var idx uint64
-        var total_frames uint64 = uint64(len(cfg.rtcbackup_cfg.streaming_video.Frames))
+        var total_frames uint64 = uint64(len(cfg.streaming_video.Frames))
         for {
             select {
             case <- ticker.C:
-                frame := cfg.rtcbackup_cfg.streaming_video.Frames[idx]
+                frame := cfg.streaming_video.Frames[idx]
                 if ivfErr := videoTrack.WriteSample(media.Sample{Data:frame, Duration:time.Second}); ivfErr != nil {
                     linfo(st.LocalUser, "Failed to send video rtp: ", ivfErr)
                     st.close_conn()
@@ -562,7 +574,7 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
                     ticker.Stop()
                     video_done <- true
                     <- audio_done
-                    ticker.Reset(cfg.rtcbackup_cfg.streaming_video.Interval)
+                    ticker.Reset(cfg.streaming_video.Interval)
                 }
             case <- st.conn_exit:
                 return
@@ -589,11 +601,11 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
         ticker := time.NewTicker(OggPageDuration)
         // we loop forever
         var idx uint64
-        var total_frames uint64 = uint64(len(cfg.rtcbackup_cfg.streaming_audio))
+        var total_frames uint64 = uint64(len(cfg.streaming_audio))
         for {
             select {
             case <- ticker.C:
-                f := cfg.rtcbackup_cfg.streaming_audio[idx]
+                f := cfg.streaming_audio[idx]
                 sampleCount := float64(f.granu - lastGranu)
                 lastGranu = f.granu
                 sampleDuration := time.Duration((sampleCount/48000)*1000) * time.Millisecond
@@ -764,7 +776,7 @@ func receive_streaming_direct(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo
         }()
     }
     // prepare ICE gathering options
-    iceOptions := webrtc.ICEGatherOptions{ICEServers: st.SubResp.IceServers}
+    iceOptions := webrtc.ICEGatherOptions{ICEServers: st.Resp.IceServers}
 
     s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
@@ -860,7 +872,7 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
         return true
     }
 
-    var info *AnswerSDPInfo = nil
+    var answer_sdp string
     if e, ok := ev["type"]; !ok {
         lerror(st.LocalUser, "Unrecognized json: ", string(buf))
     } else {
@@ -869,17 +881,16 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
                 lerror(st.LocalUser, "Found no data in the response json: ", string(buf))
                 return false
             } else {
-                if info == nil {
+                if answer_sdp == "" {
                     m := data.(map[string]interface{})
-                    sdp := m["sdp"].(string)
-                    info = readAnswerSDP(sdp)
-                    if info == nil {
-                        lerror(st.LocalUser, "Failed to extract all info from sdp")
-                        return false
-                    }
+                    answer_sdp = m["sdp"].(string)
                 }
                 // go receive_streaming_direct(cfg, st, info)
-                receive_streaming(cfg, st, cs, &info.orig_sdp)
+                if cfg.streaming {
+                    send_streaming(cfg, st, &answer_sdp)
+                } else {
+                    receive_streaming(cfg, st, cs, &answer_sdp)
+                }
             }
         } else {
             if n, ok := ev["name"]; !ok {
@@ -952,65 +963,79 @@ func create_state(cid int, cfg *AppCfg) *RunningState {
 }
 
 
-func sub_request(localUser *string, state *RunningState, cfg *AppCfg, retry *int64, sub_url string) (bool, *SubscribeResp) {
-        // we now send json request to the subscribe url
-        var reqJson = ReqJson{StreamAccountId: cfg.streamAccountId, StreamName: cfg.streamName}
-        bs, err := json.Marshal(&reqJson)
+func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url string) (bool, *PubSubResp) {
+    var bs []byte
+    if cfg.streaming {
+        var reqJson = PubReqJson{StreamName:cfg.streamName, StreamType:"WebRtc"}
+        _bs, err := json.Marshal(&reqJson)
         if err != nil {
             log.Fatal("Failed to marshal json data: ", err)
         }
-
-        client := &http.Client{}
-        var sub *SubscribeResp
-        req, err := http.NewRequest("POST", sub_url, bytes.NewBuffer(bs))
+        bs = _bs
+    } else {
+        var reqJson = SubReqJson{StreamAccountId: cfg.streamAccountId, StreamName: cfg.streamName}
+        _bs, err := json.Marshal(&reqJson)
         if err != nil {
-            if !keep_trying(localUser, retry, "") {
-                return false, nil
-            } else {
-                return true, nil
-            }
+            log.Fatal("Failed to marshal json data: ", err)
         }
-        req.Header.Set("Content-Type", "application/json")
-        for _i := 0; _i<5; _i++ {
-            if _i > 0 {
-                time.Sleep(1 * time.Second)
-            }
-            resp, err := client.Do(req)
-            if err != nil {
-                log.Error("Failed to post request json to url: ", sub_url, ",  err: ", err)
-                continue
-            }
+        bs = _bs
+    }
 
-            body, err := ioutil.ReadAll(resp.Body)
-            if err != nil {
-                log.Error("Failed to read data from response, err: ", err)
-                continue
-            }
-
-            var result map[string]interface{}
-            err = json.Unmarshal(body, &result)
-            if err != nil {
-                log.Error("Failed to unmarshal returned response json: ", body)
-                continue
-            }
-
-            sub = check_result(result)
-            if sub == nil {
-                log.Error("Server's response is not valid:", string(body))
-                continue
-            } else {
-                state.SubResp = sub
-            }
-            break
+    client := &http.Client{}
+    var parsed_resp *PubSubResp
+    req, err := http.NewRequest("POST", url, bytes.NewBuffer(bs))
+    if err != nil {
+        if !keep_trying(&state.LocalUser, retry, "") {
+            return false, nil
+        } else {
+            return true, nil
         }
-        if sub == nil {
-            if !keep_trying(localUser, retry, "Failed to decode json returned from server") {
-                return false, nil
-            } else {
-                return true, nil
-            }
+    }
+    req.Header.Set("Content-Type", "application/json")
+    if cfg.streaming {
+        req.Header.Add("Authorization", "Bearer " + *cfg.ptoken)
+    }
+
+    for _i := 0; _i<5; _i++ {
+        if _i > 0 {
+            time.Sleep(1 * time.Second)
         }
-        return true, sub
+        resp, err := client.Do(req)
+        if err != nil {
+            log.Error("Failed to post request json to url: ", url, ",  err: ", err)
+            continue
+        }
+
+        body, err := ioutil.ReadAll(resp.Body)
+        if err != nil {
+            log.Error("Failed to read data from response, err: ", err)
+            continue
+        }
+
+        var result map[string]interface{}
+        err = json.Unmarshal(body, &result)
+        if err != nil {
+            log.Error("Failed to unmarshal returned response json: ", body)
+            continue
+        }
+
+        parsed_resp = check_resp_result(result)
+        if parsed_resp == nil {
+            log.Error("Server's response is not valid:", string(body))
+            continue
+        } else {
+            state.Resp = parsed_resp
+        }
+        break
+    }
+    if parsed_resp == nil {
+        if !keep_trying(&state.LocalUser, retry, "Failed to decode json returned from server") {
+            return false, nil
+        } else {
+            return true, nil
+        }
+    }
+    return true, parsed_resp
 }
 
 func generate_jwt_token(payload string, appKey string) string {
@@ -1090,15 +1115,15 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
     if cid > 0 {
         postfix = strconv.Itoa(cid)
     }
-    var rtc_url string = fmt.Sprintf(rtcbackup_view_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName)
-    if cfg.rtcbackup_cfg.streaming {
-        rtc_url = fmt.Sprintf(rtcbackup_stream_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName + postfix, *cfg.codec)
-    } else if cfg.rtcbackup_cfg.one_on_one {
-        rtc_url = fmt.Sprintf(rtcbackup_view_tpl, *cfg.rtcbackup_cfg.platform, cfg.rtcbackup_cfg.appId, cfg.streamName + postfix)
+    var rtc_url string = fmt.Sprintf(rtcbackup_view_tpl, *cfg.platform, cfg.appId, cfg.streamName)
+    if cfg.streaming {
+        rtc_url = fmt.Sprintf(rtcbackup_stream_tpl, *cfg.platform, cfg.appId, cfg.streamName + postfix, *cfg.codec)
+    } else if cfg.one_on_one {
+        rtc_url = fmt.Sprintf(rtcbackup_view_tpl, *cfg.platform, cfg.appId, cfg.streamName + postfix)
     }
 
     action := "sub"
-    if cfg.rtcbackup_cfg.streaming {
+    if cfg.streaming {
         action = "pub"
     }
     for {
@@ -1107,13 +1132,13 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         cs.TestName = *cfg.test_name
 
         var token string
-        if cfg.rtcbackup_cfg.streaming || cfg.rtcbackup_cfg.one_on_one {
-            token = generate_jwt_token(generate_rtcbackup_payload(cfg.rtcbackup_cfg.appId, action, cfg.streamName + postfix), cfg.rtcbackup_cfg.appKey)
+        if cfg.streaming || cfg.one_on_one {
+            token = generate_jwt_token(generate_rtcbackup_payload(cfg.appId, action, cfg.streamName + postfix), cfg.appKey)
         }
 
         state.pc, state.g = create_peerconnection(cfg, state)
 
-        if !cfg.rtcbackup_cfg.streaming {
+        if !cfg.streaming {
             _, err := state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
             if err != nil {
                 panic(err)
@@ -1142,7 +1167,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
                 continue
             }
         }
-        cs.HttpSubscribe = (float64(time.Since(now)))/1000000.0
+        cs.HttpPubSub = (float64(time.Since(now)))/1000000.0
 
 
         state.conn_ch = make(chan bool)
@@ -1154,7 +1179,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             })
         }
 
-        if cfg.rtcbackup_cfg.streaming {
+        if cfg.streaming {
             send_streaming(cfg, state, answer)
         } else {
             receive_streaming(cfg, state, &cs, answer)
@@ -1174,7 +1199,6 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }
     }
 }
-
 
 
 func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
@@ -1198,8 +1222,16 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }()
     }
 
+
     const subscribe_url_tpl string = "https://director%v.millicast.com/api/director/subscribe"
-    sub_url := fmt.Sprintf(subscribe_url_tpl, get_domain_suffix(cfg.viewer_url))
+    const publish_url_tpl string = "https://director%v.millicast.com/api/director/publish"
+    var target_url string
+
+    if cfg.streaming {
+        target_url = fmt.Sprintf(publish_url_tpl, *cfg.platform) 
+    } else {
+        target_url = fmt.Sprintf(subscribe_url_tpl, *cfg.platform)
+    }
 
 
     for {
@@ -1207,15 +1239,14 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         cs.UserID = state.LocalUser
         cs.TestName = *cfg.test_name
         now := time.Now()
-        ok, sub := sub_request(&state.LocalUser, state, cfg, &retry, sub_url)
+        ok, resp := pubsub_request(cid, state, cfg, &retry, target_url)
         if !ok {
             break
-        } else if sub == nil {
+        } else if resp == nil {
             continue
         }
 
-        wss_url, err := url.Parse(sub.Url + "?token=" + sub.Jwt)
-
+        wss_url, err := url.Parse(resp.Url + "?token=" + resp.Jwt)
         if err != nil {
             if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("The wss url seems to be invalid: %v", err)) {
                 return
@@ -1224,8 +1255,8 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             }
         }
 
-        // we've successfully got wss address, we know http subscribe time
-        cs.HttpSubscribe = (float64(time.Since(now)))/1000000.0
+        // we've successfully got wss address, we know http publish/subscribe time
+        cs.HttpPubSub = (float64(time.Since(now)))/1000000.0
 
         // we now visit wss url
         conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
@@ -1237,27 +1268,52 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             }
         }
 
+        // Until now, we find out the stream account id, now we can generate the view url for convenience
+        if cfg.streaming && !printed_view_url {
+            check_url_tpl := "https://viewer%v.millicast.com?streamId=%v/%v"
+            check_url := fmt.Sprintf(check_url_tpl, *cfg.platform, resp.StreamAccountId, cfg.streamName)
+            fmt.Println("\n---------------------------------------------------------------")
+            fmt.Println("View URL:")
+            fmt.Println(check_url)
+            fmt.Println()
+            printed_view_url = true
+        }
+
         state.pc, state.g = create_peerconnection(cfg, state)
 
-        _, err = state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
-        if err != nil {
-            panic(err)
-        }
-        _, err = state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
-        if err != nil {
-            panic(err)
+
+        var cmd TransCommand
+        if cfg.streaming {
+            prepare_send_streaming(cfg, state)
+        } else {
+            _, err = state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+            if err != nil {
+                panic(err)
+            }
+            _, err = state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+            if err != nil {
+                panic(err)
+            }
         }
 
-        // prepare json
         offer, err := state.pc.CreateOffer(nil)
         if err != nil {
             panic(err)
         }
         state.offer = &offer
-        _events := []string{"active", "inactive", "layers", "viewercount"}
-        var sdp_mp = map[string]interface{}{"sdp": offer.SDP, "streamId": cfg.streamName, "events": _events}
 
-        var cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
+        if cfg.streaming {
+            _events := []string{"viewercount"}
+            var sdp_mp = map[string]interface{}{"sdp": offer.SDP, "name": cfg.streamName, "codec": cfg.codec, "record": false, "events": _events}
+            cmd = TransCommand{Type: "cmd", TransId: 0, Name: "publish", Data: sdp_mp}
+
+        } else {
+            _events := []string{"active", "inactive", "layers", "viewercount"}
+            var sdp_mp = map[string]interface{}{"sdp": offer.SDP, "streamId": cfg.streamName, "events": _events}
+
+            cmd = TransCommand{Type: "cmd", TransId: 0, Name: "view", Data: sdp_mp}
+        }
+
         bs, err := json.Marshal(&cmd)
         if err != nil {
             if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to marshal json data: %v", err)) {
@@ -1267,7 +1323,8 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             }
         }
 
-        // Send view command
+
+        // Send command
         err = conn.WriteMessage(websocket.TextMessage, bs)
         if err != nil {
             if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to send sdp via websocket connection: %v", err)) {
