@@ -495,6 +495,10 @@ func main() {
                 log.Fatal("Need to specify publish token for websocket stream publishing")
             }
 
+            if num > 1 {
+                log.Info("We currently create only one stream for websocket publishing")
+                num = 1
+            }
         } else {
             // we extract account id and stream name from the url
             m := parse(cfg.viewer_url)

@@ -360,7 +360,7 @@ func stats_read(cfg *AppCfg, st *RunningState) {
         select {
         case <- st.conn_exit:
             pc.Close()
-            ldebug(st.LocalUser, "stats report goroutine exit, notified by conn_exit")
+            ldebug(st.LocalUser, "pc.Close() called, stats report goroutine exit, notified by conn_exit")
             return
         case conn_state := <- st.conn_ch:
             if connected && !conn_state {
@@ -640,8 +640,8 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
     pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState){
         ldebug(st.LocalUser, "streaming peer connection state changed to ", s)
         if s == webrtc.PeerConnectionStateFailed {
-            lerror(st.LocalUser, "peer connection switched to failed")
             pc.Close()
+            lerror(st.LocalUser, "pc.Closed() called, peer connection switched to failed")
         }
     })
 
@@ -677,8 +677,8 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
         ldebug(st.LocalUser, "ice connection state changed to ", state)
         ice_state = state
         if ice_state == webrtc.ICEConnectionStateFailed {
-            lerror(st.LocalUser, "ice connection failed, close peerconnection")
             pc.Close()
+            lerror(st.LocalUser, "ice connection failed, pc.Closed() called")
             st.close_conn()
         }
         if (!iceConnected && ice_state == webrtc.ICEConnectionStateConnected) {
@@ -701,8 +701,8 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
 
         conn_state = state
         if conn_state == webrtc.PeerConnectionStateFailed {
-            lerror(st.LocalUser, "connection failed, close peerconnection")
             pc.Close()
+            lerror(st.LocalUser, "connection failed, pc.Closed() called")
             st.close_conn()
         }
         if (!dtlsConnected && iceConnected && state == webrtc.PeerConnectionStateConnected) {
@@ -718,7 +718,6 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
             for {
                 _, _, err := tr.Read(rtp_buf)
                 if err != nil {
-                    ldebug(st.LocalUser, fmt.Sprintf("RTP read goroutine for %v: %v exit", tr.Kind().String(), tr.SSRC()))
                     break
                 }
                 if (!firstRTPReceived) {
@@ -734,6 +733,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
                 }
             }
             pc.Close()
+            ldebug(st.LocalUser, fmt.Sprintf("RTP read goroutine for %v: %v exit, pc.Closed() called", tr.Kind().String(), tr.SSRC()))
             st.close_conn()
         }()
 
@@ -742,11 +742,11 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
             for {
                 _, _, err := rc.Read(rtcp_buf)
                 if err != nil {
-                    ldebug(st.LocalUser, fmt.Sprintf("RTCP read goroutine for %v: %v exit", rc.Track().Kind().String(), rc.Track().SSRC()))
                     break
                 }
             }
             pc.Close()
+            ldebug(st.LocalUser, fmt.Sprintf("RTCP read goroutine for %v: %v exit, pc.Closed() called", rc.Track().Kind().String(), rc.Track().SSRC()))
             st.close_conn()
         }()
     })
@@ -1187,8 +1187,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         <-state.conn_exit
         state.pc.Close()
-
-        ldebug(state.LocalUser, "Connection is completely closed")
+        ldebug(state.LocalUser, "PeerConnection is completely closed")
         if retry == 0 {
             break
         } else if retry < 0 {
