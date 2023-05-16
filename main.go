@@ -386,6 +386,7 @@ func main() {
         fs.StringVar(&streaming_audio, "streaming_audio", "", "Streaming audio file")
         fs.StringVar(&ptoken, "ptoken", "", "Specify the publish token")
 
+        fs.StringVar(&streamName, "stream_name", "", "Specify the stream name")
         fs.StringVar(&platform, "platform", "dev", "It can be 'dev', 'staging' or 'production'")
     }
 
@@ -397,7 +398,6 @@ func main() {
     rtcbackup.Uint64Var(&stkid, "stoken_id", 0, "Specify the subscribe token id [rtcbackup]")
     rtcbackup.StringVar(&stoken, "stoken", "", "Specify the subscribe token [rtcbacup]")
     rtcbackup.StringVar(&accountId, "account_id", "", "Specify the account id [rtcbackup]")
-    rtcbackup.StringVar(&streamName, "stream_name", "", "Specify the stream name [rtcbackup]")
 
     var cfg AppCfg
 
