@@ -380,8 +380,6 @@ func main() {
         fs.StringVar(&stats_dst, "report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
         fs.Int64Var(&retry_times, "retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times, default value is 0. If a negative value is provided, it retries forever.`)
 
-        fs.StringVar(&accountId, "account_id", "", "Specify the account id")
-        fs.StringVar(&streamName, "stream_name", "", "Specify the stream name")
 
         fs.BoolVar(&streaming, "streaming", false, "The client will act as a streaming client instead of a viewer if this is on, video/audio files are required.")
         fs.StringVar(&streaming_video, "streaming_video", "", "Streaming video file")
@@ -398,6 +396,8 @@ func main() {
     rtcbackup.Uint64Var(&ptkid, "ptoken_id", 0, "Specify the publish token id. It is needed in streaming mode [rtcbackup]")
     rtcbackup.Uint64Var(&stkid, "stoken_id", 0, "Specify the subscribe token id [rtcbackup]")
     rtcbackup.StringVar(&stoken, "stoken", "", "Specify the subscribe token [rtcbacup]")
+    rtcbackup.StringVar(&accountId, "account_id", "", "Specify the account id [rtcbackup]")
+    rtcbackup.StringVar(&streamName, "stream_name", "", "Specify the stream name [rtcbackup]")
 
     var cfg AppCfg
 
