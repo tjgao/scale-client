@@ -1016,7 +1016,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
         var result map[string]interface{}
         err = json.Unmarshal(body, &result)
         if err != nil {
-            log.Error("Failed to unmarshal returned response json: ", body)
+            log.Error("Failed to unmarshal returned response json: ", string(body))
             continue
         }
 
