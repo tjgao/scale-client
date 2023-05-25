@@ -1276,6 +1276,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             fmt.Println("View URL:")
             fmt.Println(check_url)
             fmt.Println()
+            fmt.Print("---------------------------------------------------------------\n\n")
             printed_view_url = true
         }
 

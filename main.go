@@ -229,7 +229,9 @@ func generate_rtcbackup_payload(appId string, action string, streamName string) 
     return string(bs)
 }
 
-func load_h264_video(f *string) *VideoData {
+// we use the time_len to estimate interval for video stream
+// note: we have the assumption that the ogg audio page duration is 20ms
+func load_h264_video(f *string, time_len time.Duration) *VideoData {
     file, err := os.Open(*f)
     if err != nil {
         panic(err)
@@ -241,7 +243,6 @@ func load_h264_video(f *string) *VideoData {
     }
 
     var data VideoData
-    data.Interval = time.Second / 30.0
     for {
         nal, err := h264.NextNAL()
         if errors.Is(err, io.EOF) {
@@ -250,6 +251,11 @@ func load_h264_video(f *string) *VideoData {
             panic(err)
         }
         data.Frames = append(data.Frames, nal.Data)
+    }
+    if len(data.Frames) > 1 || time_len > 0 {
+        data.Interval = (time.Duration)(time_len / time.Duration(len(data.Frames) - 1))
+    } else {
+        data.Interval = 30
     }
     log.Info("Load h264 file: ", *f, " ", len(data.Frames), " frames")
     return &data
@@ -421,7 +427,7 @@ func main() {
         }
 
     default:
-        log.Fatalf("Unknown subcommand '%s', please check the help info", os.Args[1])
+        log.Fatalf("Unknown subcommand '%s', available subcommands are 'ws' and 'rb', please check the help info", os.Args[1])
     }
 
     cfg.ptoken = &ptoken
@@ -444,12 +450,15 @@ func main() {
         if streaming_audio == "" || streaming_video == "" {
             log.Fatal("Need to specify video and audio files for streaming")
         }
+        cfg.streaming_audio = load_ogg_audio(&streaming_audio)
         if codec == "h264" {
-            cfg.streaming_video = load_h264_video(&streaming_video)
+            // we use the time_len to estimate interval for video stream
+            // note: we have the assumption that the ogg audio page duration is 20ms
+            cfg.streaming_video = load_h264_video(&streaming_video, (time.Duration)(int64(len(cfg.streaming_audio) - 1) * int64(OggPageDuration)))
         } else {
+            // we can do similar thing for ivf, but it seems the ivf header has provided accurate interval info
             cfg.streaming_video = load_ivf_video(&streaming_video)
         }
-        cfg.streaming_audio = load_ogg_audio(&streaming_audio)
     }
 
 
