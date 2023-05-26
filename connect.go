@@ -1328,11 +1328,8 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         wss_url, err := url.Parse(resp.Url + "?token=" + resp.Jwt)
         if err != nil {
-            if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("The wss url seems to be invalid: %v", err)) {
-                return
-            } else {
-                continue
-            }
+            lerror(state.LocalUser, "The wss url seems to be invalid: ", err)
+            return
         }
 
         // we've successfully got wss address, we know http publish/subscribe time
@@ -1341,11 +1338,8 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         // we now visit wss url
         conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
         if err != nil {
-            if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to connect websocket url: %v", wss_url.String())) {
-                return
-            } else {
-                continue
-            }
+            lerror(state.LocalUser, "Failed to connect websocket url: ", wss_url)
+            return
         }
 
         // Until now, we find out the stream account id, now we can generate the view url for convenience
@@ -1397,22 +1391,16 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         bs, err := json.Marshal(&cmd)
         if err != nil {
-            if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to marshal json data: %v", err)) {
-                return
-            } else {
-                continue
-            }
+            lerror(state.LocalUser, "Failed to marshal json data: ", err)
+            return
         }
 
 
         // Send command
         err = conn.WriteMessage(websocket.TextMessage, bs)
         if err != nil {
-            if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to send sdp via websocket connection: %v", err)) {
-                return
-            } else {
-                continue
-            }
+            lerror(state.LocalUser, "Failed to send sdp via websocket connection: ", err)
+            return
         }
 
 
