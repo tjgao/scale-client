@@ -368,7 +368,7 @@ func stats_read(cfg *AppCfg, st *RunningState) {
                 last_stats = make(map[webrtc.SSRC]stats.InboundRTPStreamStats)
                 ldebug(st.LocalUser, "stats report goroutine paused, notified by conn_ch")
             }  else if !connected && conn_state {
-                ldebug(st.LocalUser, "stats report goroutine continue, notified by conn_ch")
+                ldebug(st.LocalUser, "stats report goroutine continued, notified by conn_ch")
             }
             connected = conn_state
         case <-time.After(time.Second * time.Duration(stats_report_interval)):
@@ -964,7 +964,7 @@ func create_state(cid int, cfg *AppCfg) *RunningState {
 }
 
 
-func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url string) (bool, *PubSubResp) {
+func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url string) (bool, time.Time, *PubSubResp) {
     var bs []byte
     if cfg.streaming {
         var reqJson = PubReqJson{StreamName:cfg.streamName, StreamType:"WebRtc"}
@@ -986,57 +986,89 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
     var parsed_resp *PubSubResp
     req, err := http.NewRequest("POST", url, bytes.NewBuffer(bs))
     if err != nil {
-        if !keep_trying(&state.LocalUser, retry, "") {
-            return false, nil
-        } else {
-            return true, nil
-        }
+        lerror(state.LocalUser, "Failed to create http request object, err: ", err)
+        log.Fatal()
     }
+
     req.Header.Set("Content-Type", "application/json")
     if cfg.streaming {
         req.Header.Add("Authorization", "Bearer " + *cfg.ptoken)
     }
 
-    for _i := 0; _i<5; _i++ {
-        if _i > 0 {
-            time.Sleep(1 * time.Second)
+    // This is second, even it is a time.Duration type, dont forget to multiply time.Second
+    var delay time.Duration = 0 
+    var now time.Time
+    var attempt int = 0
+    for {
+        if delay > 0 {
+            time.Sleep(delay * time.Second)
         }
+        now = time.Now()
         resp, err := client.Do(req)
         if err != nil {
-            log.Error("Failed to post request json to url: ", url, ",  err: ", err)
-            continue
+            // This should not happen
+            lerror(state.LocalUser, "Failed to post request json to url: ", url, ",  err: ", err)
+            log.Fatal()
         }
 
-        body, err := ioutil.ReadAll(resp.Body)
-        if err != nil {
-            log.Error("Failed to read data from response, err: ", err)
-            continue
+        if resp.StatusCode == 200 || resp.StatusCode == 201 {
+            body, err := ioutil.ReadAll(resp.Body)
+            if err != nil {
+                lerror(state.LocalUser, "Failed to read data from response, err: ", err)
+                log.Fatal()
+            }
+
+            var result map[string]interface{}
+            err = json.Unmarshal(body, &result)
+            if err != nil {
+                lerror(state.LocalUser, "Failed to unmarshal returned response json: ", string(body))
+                log.Fatal()
+            }
+
+            parsed_resp = check_resp_result(result)
+            if parsed_resp == nil {
+                lerror(state.LocalUser, "Server returned a success status code, but the json is not valid")
+                log.Fatal()
+            } else {
+                state.Resp = parsed_resp
+            }
+            break
         }
 
-        var result map[string]interface{}
-        err = json.Unmarshal(body, &result)
-        if err != nil {
-            log.Error("Failed to unmarshal returned response json: ", string(body))
-            continue
-        }
-
-        parsed_resp = check_resp_result(result)
-        if parsed_resp == nil {
-            log.Error("Server's response is not valid:", string(body))
-            continue
+        if resp.StatusCode < 400 || resp.StatusCode > 499 {
+            lerror(state.LocalUser, "Server return status code ", resp.StatusCode, ", connect goroutine exits")
+            return false, now, nil
+        } else if resp.StatusCode == 401 {
+            lerror(state.LocalUser, "Received Unauthorized 401 status code from server, connect goroutine exits")
+            return false, now, nil
         } else {
-            state.Resp = parsed_resp
-        }
-        break
+            attempt += 1
+            if resp.StatusCode == 429 {
+                retry_after, ok := resp.Header["Retry-After"]
+                if ok {
+                    _delay, err := strconv.Atoi(retry_after[0])
+                    if err == nil && _delay > 0 {
+                        delay = time.Duration(_delay)
+                        ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after ", delay, "s as per server's request. Attempt: ", attempt)
+                        continue
+                    } else {
+                        lerror(state.LocalUser, "Server returns 429 error with an invalid 'Retry-After' field in the HTTP header")
+                    }
+                }
+            }
+
+            if delay == 0 {
+                delay = 1
+            } else {
+                delay = 2 * delay 
+            }
+            if delay > 64 {
+                delay = 64
+            }
+            ldebug(state.LocalUser, "Server's status code = ", resp.StatusCode, ". Wait ", delay, "s and retry. Attemp: ", attempt)
+        } 
     }
-    if parsed_resp == nil {
-        if !keep_trying(&state.LocalUser, retry, "Failed to decode json returned from server") {
-            return false, nil
-        } else {
-            return true, nil
-        }
-    }
-    return true, parsed_resp
+    return true, now, parsed_resp
 }
 
 func generate_jwt_token(payload string, appKey string) string {
@@ -1049,28 +1081,78 @@ func generate_jwt_token(payload string, appKey string) string {
 }
 
 
-func rtcbackup_request(st *RunningState, url string, token *string, sdp *string) *string {
+func rtcbackup_request(st *RunningState, url string, token *string, sdp *string) (*string, time.Time) {
     // send rtcbackup post request with the token
+    var now time.Time
     req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(*sdp)))
     if err != nil {
         lerror(st.LocalUser, "Failed to create HTTP post object: ", err);
-        return nil
+        log.Fatal()
+        return nil, now
     }
     req.Header.Add("Authorization", "Bearer " + *token)
     req.Header.Set("Content-Type", "application/sdp")
     client := &http.Client{}
-    resp, err := client.Do(req)
-    if err != nil {
-        linfo(st.LocalUser, fmt.Sprintf("Failed to post offer sdp to %v, err: %v", url, err))
-        return nil
+    var answer string
+    var delay time.Duration
+    var attempt int
+    for {
+        if delay > 0 {
+            time.Sleep(delay * time.Second)
+        }
+        now = time.Now()
+        resp, err := client.Do(req)
+        if err != nil {
+            lerror(st.LocalUser, fmt.Sprintf("Failed to post offer sdp to %v, err: %v", url, err))
+            log.Fatal()
+            return nil, now
+        }
+
+        if resp.StatusCode == 200 || resp.StatusCode == 201 {
+            body, err := ioutil.ReadAll(resp.Body)
+            if err != nil {
+                lerror(st.LocalUser, "Failed to read from response body")
+                log.Fatal()
+            }
+            answer = string(body)
+            break
+        }
+
+        if resp.StatusCode < 400 || resp.StatusCode > 499 {
+            lerror(st.LocalUser, "Server return status code ", resp.StatusCode, ", connect goroutine exits")
+            return nil, now
+        } else if resp.StatusCode == 401 {
+            lerror(st.LocalUser, "Received Unauthorized 401 status code from server, connect goroutine exits")
+            return nil, now
+        } else {
+            attempt += 1
+            if resp.StatusCode == 429 {
+                retry_after, ok := resp.Header["Retry-After"]
+                if ok {
+                    _delay, err := strconv.Atoi(retry_after[0])
+                    if err == nil && _delay > 0 {
+                        delay = time.Duration(_delay)
+                        ldebug(st.LocalUser, "Server is on rate limit, will try reconnecting after ", delay, "s as per server's request. Attempt: ", attempt)
+                        continue
+                    } else {
+                        lerror(st.LocalUser, "Server returns 429 error with an invalid 'Retry-After' field in the HTTP header")
+                    }
+                }
+
+            }
+
+            if delay == 0 {
+                delay = 1
+            } else {
+                delay = 2 * delay 
+            }
+            if delay > 64 {
+                delay = 64
+            }
+            ldebug(st.LocalUser, "Server's status code = ", resp.StatusCode, ". Wait ", delay, "s and retry. Attemp: ", attempt)
+        }
     }
-    body, err := ioutil.ReadAll(resp.Body)
-    answer := string(body)
-    if resp.StatusCode != 201 {
-        linfo(st.LocalUser, "Server returned status code:", resp.StatusCode, ", error: ", answer)
-        return nil
-    }
-    return &answer
+    return &answer, now
 }
 
 func send_streaming(cfg *AppCfg, st *RunningState, answer_sdp *string) {
@@ -1159,8 +1241,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }
         state.offer = &offer
 
-        now := time.Now()
-        answer := rtcbackup_request(state, rtc_url, &token, &state.offer.SDP)
+        answer, now := rtcbackup_request(state, rtc_url, &token, &state.offer.SDP)
         if answer == nil {
             if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to POST offer sdp")) {
                 return
@@ -1238,8 +1319,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         var cs ConnectStats
         cs.UserID = state.LocalUser
         cs.TestName = *cfg.test_name
-        now := time.Now()
-        ok, resp := pubsub_request(cid, state, cfg, &retry, target_url)
+        ok, now, resp := pubsub_request(cid, state, cfg, &retry, target_url)
         if !ok {
             break
         } else if resp == nil {
