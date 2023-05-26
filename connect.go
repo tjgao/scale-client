@@ -495,21 +495,8 @@ func stats_read(cfg *AppCfg, st *RunningState) {
     }
 }
 
-
-func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
-    if cfg.rate_limit_connecting != nil {
-        defer func() {
-            b := st.connecting.Load()
-            if b {
-                st.connecting.Store(false)
-                *cfg.rate_limit_connecting <- struct{}{}
-            }
-        }()
-    }
-
+func prepare_pc_for_publishing(cfg *AppCfg, st *RunningState) {
     pc := st.pc
-
-    iceConnected, iceConnectedCancel := context.WithCancel(context.Background())
 
     var video_codec string
     if *cfg.codec == "h264" {
@@ -522,7 +509,6 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
         log.Fatal("Unknown codec type")
     }
 
-
     videoTrack, videoTrackErr := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType:video_codec}, "video", "pion")
     if videoTrackErr != nil {
         panic(videoTrackErr)
@@ -532,6 +518,18 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
     if videoTrackErr != nil {
         panic(videoTrackErr)
     }
+
+    audioTrack, audioTrackErr := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType:webrtc.MimeTypeOpus}, "audio", "pion")
+    if audioTrackErr != nil {
+        panic(audioTrackErr)
+    }
+
+    audioRtpSender, audioTrackErr := pc.AddTrack(audioTrack)
+    if audioTrackErr != nil {
+        panic(audioTrackErr)
+    }
+
+    iceConnected, iceConnectedCancel := context.WithCancel(context.Background())
 
     rtcp_read_goroutine := func(sender *webrtc.RTPSender) {
         rtcpBuf := make([]byte, 1500)
@@ -581,16 +579,6 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
             }
         }
     }()
-
-    audioTrack, audioTrackErr := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType:webrtc.MimeTypeOpus}, "audio", "pion")
-    if audioTrackErr != nil {
-        panic(audioTrackErr)
-    }
-
-    audioRtpSender, audioTrackErr := pc.AddTrack(audioTrack)
-    if audioTrackErr != nil {
-        panic(audioTrackErr)
-    }
 
     go rtcp_read_goroutine(audioRtpSender)
 
@@ -644,7 +632,6 @@ func prepare_send_streaming(cfg *AppCfg, st *RunningState) {
             lerror(st.LocalUser, "pc.Closed() called, peer connection switched to failed")
         }
     })
-
 }
 
 
@@ -982,24 +969,24 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
         bs = _bs
     }
 
-    client := &http.Client{}
     var parsed_resp *PubSubResp
-    req, err := http.NewRequest("POST", url, bytes.NewBuffer(bs))
-    if err != nil {
-        lerror(state.LocalUser, "Failed to create http request object, err: ", err)
-        log.Fatal()
-    }
-
-    req.Header.Set("Content-Type", "application/json")
-    if cfg.streaming {
-        req.Header.Add("Authorization", "Bearer " + *cfg.ptoken)
-    }
 
     // This is second, even it is a time.Duration type, dont forget to multiply time.Second
     var delay time.Duration = 0 
     var now time.Time
     var attempt int = 0
     for {
+        client := &http.Client{}
+        req, err := http.NewRequest("POST", url, bytes.NewBuffer(bs))
+        if err != nil {
+            lerror(state.LocalUser, "Failed to create http request object, err: ", err)
+            log.Fatal()
+        }
+
+        req.Header.Set("Content-Type", "application/json")
+        if cfg.streaming {
+            req.Header.Add("Authorization", "Bearer " + *cfg.ptoken)
+        }
         if delay > 0 {
             time.Sleep(delay * time.Second)
         }
@@ -1036,7 +1023,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
         }
 
         if resp.StatusCode < 400 || resp.StatusCode > 499 {
-            lerror(state.LocalUser, "Server return status code ", resp.StatusCode, ", connect goroutine exits")
+            lerror(state.LocalUser, "Server return status code", resp.StatusCode, ", connect goroutine exits")
             return false, now, nil
         } else if resp.StatusCode == 401 {
             lerror(state.LocalUser, "Received Unauthorized 401 status code from server, connect goroutine exits")
@@ -1049,7 +1036,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
                     _delay, err := strconv.Atoi(retry_after[0])
                     if err == nil && _delay > 0 {
                         delay = time.Duration(_delay)
-                        ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after ", delay, "s as per server's request. Attempt: ", attempt)
+                        ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Attempt: ", attempt)
                         continue
                     } else {
                         lerror(state.LocalUser, "Server returns 429 error with an invalid 'Retry-After' field in the HTTP header")
@@ -1065,7 +1052,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
             if delay > 64 {
                 delay = 64
             }
-            ldebug(state.LocalUser, "Server's status code = ", resp.StatusCode, ". Wait ", delay, "s and retry. Attemp: ", attempt)
+            ldebug(state.LocalUser, "Server's status code =", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Attemp: ", attempt)
         } 
     }
     return true, now, parsed_resp
@@ -1081,29 +1068,41 @@ func generate_jwt_token(payload string, appKey string) string {
 }
 
 
-func rtcbackup_request(st *RunningState, url string, token *string, sdp *string) (*string, time.Time) {
-    // send rtcbackup post request with the token
+func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *string) (*string, time.Time) {
     var now time.Time
-    req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(*sdp)))
-    if err != nil {
-        lerror(st.LocalUser, "Failed to create HTTP post object: ", err);
-        log.Fatal()
-        return nil, now
-    }
-    req.Header.Add("Authorization", "Bearer " + *token)
-    req.Header.Set("Content-Type", "application/sdp")
-    client := &http.Client{}
     var answer string
     var delay time.Duration
     var attempt int
+
+    action := "sub"
+    if cfg.streaming {
+        action = "pub"
+    }
+
     for {
+        var token string
+        if cfg.streaming || cfg.one_on_one {
+            token = generate_jwt_token(generate_rtcbackup_payload(cfg.appId, action, cfg.streamName + *postfix), cfg.appKey)
+        }
+
+        req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(state.offer.SDP)))
+        if err != nil {
+            lerror(state.LocalUser, "Failed to create HTTP post object: ", err);
+            log.Fatal()
+            return nil, now
+        }
+        req.Header.Add("Authorization", "Bearer " + token)
+        req.Header.Set("Content-Type", "application/sdp")
+
+        client := &http.Client{}
+
         if delay > 0 {
             time.Sleep(delay * time.Second)
         }
         now = time.Now()
         resp, err := client.Do(req)
         if err != nil {
-            lerror(st.LocalUser, fmt.Sprintf("Failed to post offer sdp to %v, err: %v", url, err))
+            lerror(state.LocalUser, fmt.Sprintf("Failed to post offer sdp to %v, err: %v", url, err))
             log.Fatal()
             return nil, now
         }
@@ -1111,7 +1110,7 @@ func rtcbackup_request(st *RunningState, url string, token *string, sdp *string)
         if resp.StatusCode == 200 || resp.StatusCode == 201 {
             body, err := ioutil.ReadAll(resp.Body)
             if err != nil {
-                lerror(st.LocalUser, "Failed to read from response body")
+                lerror(state.LocalUser, "Failed to read from response body")
                 log.Fatal()
             }
             answer = string(body)
@@ -1119,10 +1118,10 @@ func rtcbackup_request(st *RunningState, url string, token *string, sdp *string)
         }
 
         if resp.StatusCode < 400 || resp.StatusCode > 499 {
-            lerror(st.LocalUser, "Server return status code ", resp.StatusCode, ", connect goroutine exits")
+            lerror(state.LocalUser, "Server return status code", resp.StatusCode, ", connect goroutine exits")
             return nil, now
         } else if resp.StatusCode == 401 {
-            lerror(st.LocalUser, "Received Unauthorized 401 status code from server, connect goroutine exits")
+            lerror(state.LocalUser, "Received Unauthorized 401 status code from server, connect goroutine exits")
             return nil, now
         } else {
             attempt += 1
@@ -1132,10 +1131,10 @@ func rtcbackup_request(st *RunningState, url string, token *string, sdp *string)
                     _delay, err := strconv.Atoi(retry_after[0])
                     if err == nil && _delay > 0 {
                         delay = time.Duration(_delay)
-                        ldebug(st.LocalUser, "Server is on rate limit, will try reconnecting after ", delay, "s as per server's request. Attempt: ", attempt)
+                        ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Attempt: ", attempt)
                         continue
                     } else {
-                        lerror(st.LocalUser, "Server returns 429 error with an invalid 'Retry-After' field in the HTTP header")
+                        lerror(state.LocalUser, "Server returns 429 error with an invalid 'Retry-After' field in the HTTP header")
                     }
                 }
 
@@ -1149,7 +1148,7 @@ func rtcbackup_request(st *RunningState, url string, token *string, sdp *string)
             if delay > 64 {
                 delay = 64
             }
-            ldebug(st.LocalUser, "Server's status code = ", resp.StatusCode, ". Wait ", delay, "s and retry. Attemp: ", attempt)
+            ldebug(state.LocalUser, "Server's status code =", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Attemp: ", attempt)
         }
     }
     return &answer, now
@@ -1162,7 +1161,6 @@ func send_streaming(cfg *AppCfg, st *RunningState, answer_sdp *string) {
     }
     remote := webrtc.SessionDescription{SDP: *answer_sdp, Type: webrtc.SDPTypeAnswer}
     st.pc.SetRemoteDescription(remote)
-
     // go stats_read(cfg, st)
 }
 
@@ -1205,19 +1203,10 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         rtc_url = fmt.Sprintf(rtcbackup_view_tpl, *cfg.platform, cfg.appId, cfg.streamName + postfix)
     }
 
-    action := "sub"
-    if cfg.streaming {
-        action = "pub"
-    }
     for {
         var cs ConnectStats
         cs.UserID = state.LocalUser
         cs.TestName = *cfg.test_name
-
-        var token string
-        if cfg.streaming || cfg.one_on_one {
-            token = generate_jwt_token(generate_rtcbackup_payload(cfg.appId, action, cfg.streamName + postfix), cfg.appKey)
-        }
 
         state.pc, state.g = create_peerconnection(cfg, state)
 
@@ -1231,17 +1220,15 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
                 panic(err)
             }
         } else {
-            prepare_send_streaming(cfg, state)
+            prepare_pc_for_publishing(cfg, state)
         }
-
 
         offer, err := state.pc.CreateOffer(nil)
         if err != nil {
             panic(err)
         }
         state.offer = &offer
-
-        answer, now := rtcbackup_request(state, rtc_url, &token, &state.offer.SDP)
+        answer, now := rtcbackup_request(state, rtc_url, cfg, &postfix)
         if answer == nil {
             if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to POST offer sdp")) {
                 return
@@ -1322,9 +1309,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         ok, now, resp := pubsub_request(cid, state, cfg, &retry, target_url)
         if !ok {
             break
-        } else if resp == nil {
-            continue
-        }
+        } 
 
         wss_url, err := url.Parse(resp.Url + "?token=" + resp.Jwt)
         if err != nil {
@@ -1359,7 +1344,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         var cmd TransCommand
         if cfg.streaming {
-            prepare_send_streaming(cfg, state)
+            prepare_pc_for_publishing(cfg, state)
         } else {
             _, err = state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
             if err != nil {
