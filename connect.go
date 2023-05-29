@@ -871,7 +871,11 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
                 if answer_sdp == "" {
                     m := data.(map[string]interface{})
                     answer_sdp = m["sdp"].(string)
-                    ldebug(st.LocalUser, "clusterId =", m["clusterId"], "streamViewId =", m["streamViewId"], "subscriberId =", m["subscriberId"])
+                    if cfg.streaming {
+                        ldebug(st.LocalUser, "clusterId =", m["clusterId"], "streamId =", m["streamId"], "publisherId =", m["publisherId"])
+                    } else {
+                        ldebug(st.LocalUser, "clusterId =", m["clusterId"], "streamViewId =", m["streamViewId"], "subscriberId =", m["subscriberId"])
+                    }
                 }
                 // go receive_streaming_direct(cfg, st, info)
                 if cfg.streaming {
