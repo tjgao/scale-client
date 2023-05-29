@@ -24,7 +24,6 @@ import (
     "time"
 
     "github.com/gorilla/websocket"
-    "github.com/pion/ice/v2"
     "github.com/pion/interceptor"
     "github.com/pion/interceptor/pkg/stats"
     "github.com/pion/logging"
@@ -172,91 +171,6 @@ func check_resp_result(result map[string]interface{}) *PubSubResp {
     return &resp
 }
 
-
-func convertTypeFromICE(t ice.CandidateType) (webrtc.ICECandidateType, error) {
-    switch t {
-    case ice.CandidateTypeHost:
-        return webrtc.ICECandidateTypeHost, nil
-    case ice.CandidateTypeServerReflexive:
-        return webrtc.ICECandidateTypeSrflx, nil
-    case ice.CandidateTypePeerReflexive:
-        return webrtc.ICECandidateTypePrflx, nil
-    case ice.CandidateTypeRelay:
-        return webrtc.ICECandidateTypeRelay, nil
-    default:
-        return webrtc.ICECandidateType(t), errors.New("Unknown ICE candidate type")
-    }
-}
-
-func newICECandidateFromICE(i ice.Candidate) (webrtc.ICECandidate, error) {
-    typ, err := convertTypeFromICE(i.Type())
-    if err != nil {
-        return webrtc.ICECandidate{}, err
-    }
-    protocol, err := webrtc.NewICEProtocol(i.NetworkType().NetworkShort())
-    if err != nil {
-        return webrtc.ICECandidate{}, err
-    }
-
-    c := webrtc.ICECandidate{
-        Foundation: i.Foundation(),
-        Priority:   i.Priority(),
-        Address:    i.Address(),
-        Protocol:   protocol,
-        Port:       uint16(i.Port()),
-        Component:  i.Component(),
-        Typ:        typ,
-        TCPType:    i.TCPType().String(),
-    }
-
-    if i.RelatedAddress() != nil {
-        c.RelatedAddress = i.RelatedAddress().Address
-        c.RelatedPort = uint16(i.RelatedAddress().Port)
-    }
-
-    return c, nil
-}
-
-func create_ice_connection(st *RunningState, info *AnswerSDPInfo) *ice.Conn {
-    iceAgent, err := ice.NewAgent(&ice.AgentConfig{
-        NetworkTypes: []ice.NetworkType{ice.NetworkTypeUDP4},
-        LocalUfrag:   st.LocalUser,
-        LocalPwd:     st.LocalPwd,
-    })
-    if err != nil {
-        panic(err)
-    }
-
-    // It seems fine if the line below is removed
-    iceAgent.SetRemoteCredentials(info.Ice.Ufrag, info.Ice.Pwd)
-
-    for _, i := range info.Candidates {
-        log.Debug(i)
-        c, err := ice.UnmarshalCandidate(i)
-        if err != nil {
-            panic(err)
-        }
-        iceAgent.AddRemoteCandidate(c)
-    }
-
-    if err = iceAgent.OnCandidate(func(c ice.Candidate) {}); err != nil {
-        panic(err)
-    }
-
-    if err = iceAgent.GatherCandidates(); err != nil {
-        panic(err)
-    }
-
-    iceAgent.OnConnectionStateChange(func(state ice.ConnectionState) {
-        log.Debug("ice state changed to ", state)
-    })
-    conn, err := iceAgent.Dial(context.TODO(), info.Ice.Ufrag, info.Ice.Pwd)
-    if err != nil {
-        log.Error("Failed to create ICE connection: ", err)
-    }
-
-    return conn
-}
 
 
 func create_peerconnection(cfg *AppCfg, st *RunningState) (*webrtc.PeerConnection, *stats.Getter) {
@@ -750,105 +664,6 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
     go stats_read(cfg, st)
 }
 
-// This is a way to directly manipulate transport objects and ice gather object
-// It also takes advantage of a SDP template
-func receive_streaming_direct(cfg *AppCfg, st *RunningState, info *AnswerSDPInfo) {
-    if cfg.rate_limit_connecting != nil {
-        defer func() {
-            b := st.connecting.Load()
-            if b {
-                st.connecting.Store(false)
-                *cfg.rate_limit_connecting <- struct{}{}
-            }
-        }()
-    }
-    // prepare ICE gathering options
-    iceOptions := webrtc.ICEGatherOptions{ICEServers: st.Resp.IceServers}
-
-    s := webrtc.SettingEngine{}
-    s.SetICECredentials(st.LocalUser, st.LocalPwd)
-    s.SetAnsweringDTLSRole(webrtc.DTLSRoleClient)
-
-    api := webrtc.NewAPI(webrtc.WithSettingEngine(s))
-
-    gatherer, err := api.NewICEGatherer(iceOptions)
-    if err != nil {
-        panic(err)
-    }
-
-    ice_transport := api.NewICETransport(gatherer)
-
-    // Create DTLS transport, use our cert
-    dtls_transport, err := api.NewDTLSTransport(ice_transport, []webrtc.Certificate{st.Cert})
-    if err != nil {
-        panic(err)
-    }
-
-    rtp_receiver, err := api.NewRTPReceiver(webrtc.RTPCodecTypeVideo, dtls_transport)
-    if err != nil {
-        panic(err)
-    }
-
-    gatherFinished := make(chan struct{})
-    gatherer.OnLocalCandidate(func(i *webrtc.ICECandidate) {
-        if i == nil {
-            close(gatherFinished)
-        } else {
-            // ldebug(st.cid, "add one candidate: ", i.String())
-        }
-    })
-
-    // Gather candidates
-    err = gatherer.Gather()
-    if err != nil {
-        panic(err)
-    }
-
-    <-gatherFinished
-
-    // Add remote candidates into ice transport
-    for _, i := range info.Candidates {
-        c, err := ice.UnmarshalCandidate(i)
-        if err != nil {
-            panic(err)
-        }
-        cc, err := newICECandidateFromICE(c)
-        if err != nil {
-            panic(err)
-        }
-        ice_transport.AddRemoteCandidate(&cc)
-    }
-
-    ice_transport.OnConnectionStateChange(func(state webrtc.ICETransportState) {
-        ldebug(st.LocalUser, "ICE state changed to ", state)
-    })
-    ice_transport.OnSelectedCandidatePairChange(func(p *webrtc.ICECandidatePair) {
-        ldebug(st.LocalUser, "ICE candidate pair changed ", p)
-    })
-
-    iceRole := webrtc.ICERoleControlling
-    err = ice_transport.Start(gatherer, webrtc.ICEParameters{UsernameFragment: info.Ice.Ufrag, Password: info.Ice.Pwd, ICELite: info.Ice.Lite}, &iceRole)
-    if err != nil {
-        panic(err)
-    }
-
-    dtls_transport.OnStateChange(func(state webrtc.DTLSTransportState) {
-        ldebug(st.LocalUser, "DTLS state changed to ", state)
-    })
-
-    err = dtls_transport.Start(webrtc.DTLSParameters{Role: webrtc.DTLSRoleServer,
-        Fingerprints: []webrtc.DTLSFingerprint{{Algorithm: info.Dtls.Hash, Value: info.Dtls.Fingerprint}}})
-    if err != nil {
-        panic(err)
-    }
-
-    err = rtp_receiver.Receive(info.RTPRecvParams)
-    if err != nil {
-        panic(err)
-    }
-
-    ldebug(st.LocalUser, "Connection is working")
-}
 
 func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool {
     var ev map[string]interface{}
@@ -877,7 +692,6 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
                         ldebug(st.LocalUser, "clusterId =", m["clusterId"], "streamViewId =", m["streamViewId"], "subscriberId =", m["subscriberId"])
                     }
                 }
-                // go receive_streaming_direct(cfg, st, info)
                 if cfg.streaming {
                     send_streaming(cfg, st, &answer_sdp)
                 } else {

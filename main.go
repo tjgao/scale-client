@@ -191,6 +191,21 @@ func uint64_bytes(n uint64) string {
 }
 
 
+func genRandomString(length uint, chars string) string {
+    var lens = len(chars)
+    res := ""
+    for i := uint(0); i < length; i++ {
+        res += string(chars[rand.Intn(lens)])
+    }
+    return res
+}
+
+
+func genRandomHash(length uint) string {
+    return genRandomString(length, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+}
+
+
 func generate_appid(streamId string, ptoken_id uint64, stoken_id uint64) string {
     return streamId + "." + uint64_bytes(ptoken_id) + "." + uint64_bytes(stoken_id)
 }
