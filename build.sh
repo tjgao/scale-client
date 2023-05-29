@@ -1,6 +1,6 @@
 #!/bin/sh
-go get github.com/gorilla/websocket
-go get github.com/sirupsen/logrus
+# go get github.com/gorilla/websocket
+# go get github.com/sirupsen/logrus
 
 mkdir -p build
 

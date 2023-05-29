@@ -9,7 +9,7 @@ require (
 	github.com/pion/logging v0.2.2
 	github.com/pion/sdp/v2 v2.4.0
 	github.com/pion/webrtc/v3 v3.1.55
-	github.com/sirupsen/logrus v1.9.0
+	github.com/sirupsen/logrus v1.9.2
 )
 
 require (
