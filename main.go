@@ -309,18 +309,18 @@ func load_ogg_audio(f *string) []OggFrame {
     return oggFrames
 }
 
-
-func create_app_id_key(cfg *AppCfg) {
-    if *cfg.stoken == "" || cfg.stoken_id == 0 || *cfg.ptoken == "" || cfg.ptoken_id == 0 {
-        log.Fatal("Must specify pub/sub token and token id")
+func create_app_id(cfg* AppCfg) {
+    if cfg.ptoken_id == 0 || cfg.stoken_id == 0 || cfg.streamAccountId == ""{
+        log.Fatal("Must specify pub/sub token id and stream account id")
     }
-
-    if cfg.streamAccountId == "" || cfg.streamName == "" {
-        log.Fatal("Must specify accountId/streamName")
-    }
-    // we calculate appId and appKey here as this only needs to be done once
-    // but later we'll use them to generate jwt token for each connection as that has a timing effect (expire in some time)
     cfg.appId = generate_appid(cfg.streamAccountId, cfg.ptoken_id, cfg.stoken_id)
+}
+
+
+func create_app_key(cfg* AppCfg) {
+    if *cfg.ptoken == "" || *cfg.stoken == "" {
+        log.Fatal("Must specify pub/sub token")
+    } 
     cfg.appKey = generate_appkey(cfg.ptoken, cfg.stoken)
 }
 
@@ -481,11 +481,17 @@ func main() {
     rand.Seed(time.Now().UnixNano())
 
     if cfg.rtcbackup {
-        create_app_id_key(&cfg)
+        create_app_id(&cfg)
+        if cfg.streaming {
+            create_app_key(&cfg)
+        }
+        if cfg.streamName == "" {
+            log.Fatal("Must specify stream name")
+        }
         // we should have enough information to figure out the view url, it is printed out for convenience
-        check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v&token=%v"
+        check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v"
         special_rtcbackup_name := url.QueryEscape(generate_rtcbackup_name(cfg.ptoken_id, cfg.stoken_id, &cfg.streamName))
-        check_url := fmt.Sprintf(check_url_tpl, *cfg.platform, cfg.streamAccountId, special_rtcbackup_name, *cfg.stoken);
+        check_url := fmt.Sprintf(check_url_tpl, *cfg.platform, cfg.streamAccountId, special_rtcbackup_name);
         fmt.Println("\n---------------------------------------------------------------")
         fmt.Println("View URL:")
         fmt.Println(check_url)

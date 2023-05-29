@@ -1081,7 +1081,7 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
 
     for {
         var token string
-        if cfg.streaming || cfg.one_on_one {
+        if cfg.streaming  {
             token = generate_jwt_token(generate_rtcbackup_payload(cfg.appId, action, cfg.streamName + *postfix), cfg.appKey)
         }
 
@@ -1091,7 +1091,9 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
             log.Fatal()
             return nil, now
         }
-        req.Header.Add("Authorization", "Bearer " + token)
+        if cfg.streaming {
+            req.Header.Add("Authorization", "Bearer " + token)
+        }
         req.Header.Set("Content-Type", "application/sdp")
 
         client := &http.Client{}
