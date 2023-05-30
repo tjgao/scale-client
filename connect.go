@@ -856,10 +856,9 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
                         delay = time.Duration(_delay)
                         ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Attempt: ", attempt)
                         continue
-                    } else {
-                        lerror(state.LocalUser, "Server returns 429 error with an invalid 'Retry-After' field in the HTTP header")
-                    }
+                    } 
                 }
+                ldebug(state.LocalUser, "Server returns 429 status code wihout or with an invalid 'Retry-After' field in the HTTP header")
             }
 
             if delay == 0 {
@@ -870,7 +869,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
             if delay > 64 {
                 delay = 64
             }
-            ldebug(state.LocalUser, "Server's status code =", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Attemp: ", attempt)
+            ldebug(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Attemp: ", attempt)
         } 
     }
     return true, now, parsed_resp
@@ -953,11 +952,9 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
                         delay = time.Duration(_delay)
                         ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Attempt: ", attempt)
                         continue
-                    } else {
-                        lerror(state.LocalUser, "Server returns 429 error with an invalid 'Retry-After' field in the HTTP header")
-                    }
+                    } 
                 }
-
+                ldebug(state.LocalUser, "Server returns 429 status code wihout or with an invalid 'Retry-After' field in the HTTP header")
             }
 
             if delay == 0 {
@@ -968,7 +965,7 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
             if delay > 64 {
                 delay = 64
             }
-            ldebug(state.LocalUser, "Server's status code =", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Attemp: ", attempt)
+            ldebug(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Attemp: ", attempt)
         }
     }
     return &answer, now
