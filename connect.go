@@ -848,17 +848,22 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
             return false, now, nil
         } else {
             attempt += 1
+            body, err := ioutil.ReadAll(resp.Body)
+            if err != nil {
+                lerror(state.LocalUser, "Failed to read body: ", err)
+                log.Fatal()
+            }
             if resp.StatusCode == 429 {
                 retry_after, ok := resp.Header["Retry-After"]
                 if ok {
                     _delay, err := strconv.Atoi(retry_after[0])
                     if err == nil && _delay > 0 {
                         delay = time.Duration(_delay)
-                        ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Attempt: ", attempt)
+                        ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Body:'", string(body), "'. Attempt: ", attempt)
                         continue
                     } 
                 }
-                ldebug(state.LocalUser, "Server returns 429 status code wihout or with an invalid 'Retry-After' field in the HTTP header")
+                ldebug(state.LocalUser, "Server returns 429 status code wihout 'Retry-After' field or with an invalid 'Retry-After' field in the HTTP header. Body:", string(body))
             }
 
             if delay == 0 {
@@ -869,7 +874,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
             if delay > 64 {
                 delay = 64
             }
-            ldebug(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Attemp: ", attempt)
+            ldebug(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Body:'", string(body), "'. Attemp: ", attempt)
         } 
     }
     return true, now, parsed_resp
@@ -944,17 +949,22 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
             return nil, now
         } else {
             attempt += 1
+            body, err := ioutil.ReadAll(resp.Body)
+            if err != nil {
+                lerror(state.LocalUser, "Failed to read body: ", err)
+                log.Fatal()
+            }
             if resp.StatusCode == 429 {
                 retry_after, ok := resp.Header["Retry-After"]
                 if ok {
                     _delay, err := strconv.Atoi(retry_after[0])
                     if err == nil && _delay > 0 {
                         delay = time.Duration(_delay)
-                        ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Attempt: ", attempt)
+                        ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Body:'", string(body), "'. Attempt: ", attempt)
                         continue
                     } 
                 }
-                ldebug(state.LocalUser, "Server returns 429 status code wihout or with an invalid 'Retry-After' field in the HTTP header")
+                ldebug(state.LocalUser, "Server returns 429 status code wihout 'Retry-After' field or with an invalid 'Retry-After' field in the HTTP header. Body:", string(body))
             }
 
             if delay == 0 {
@@ -965,7 +975,7 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
             if delay > 64 {
                 delay = 64
             }
-            ldebug(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Attemp: ", attempt)
+            ldebug(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Body:'", string(body), "'. Attemp: ", attempt)
         }
     }
     return &answer, now
