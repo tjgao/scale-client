@@ -604,6 +604,7 @@ func main() {
             time.Sleep(time.Duration(conn_interval * 1e9))
         }
     }
+    log.Info("Test name: ", *cfg.test_name)
     log.Info("The total connecting time(s): ", float64(time.Since(before_connect))/1e9)
 
     wg.Wait()
