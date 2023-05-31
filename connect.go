@@ -764,6 +764,7 @@ func create_state(cid int, cfg *AppCfg) *RunningState {
     }
 
     var state = RunningState{cid: cid, Cert: *cert, LocalUser: genRandomHash(16), LocalPwd: genRandomHash(48)}
+    ldebug(state.LocalUser, " Ready for connection.")
 
     return &state
 }
