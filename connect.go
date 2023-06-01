@@ -561,6 +561,7 @@ func prepare_pc_for_publishing(cfg *AppCfg, st *RunningState, cs *ConnectStats) 
             }
             cs.Server = p.Remote.Address
             st.server = p.Remote.Address
+            linfo(st.LocalUser, "Connected to server:", cs.Server)
         }
     })
 }
@@ -632,12 +633,12 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
             }
             cs.Server = p.Remote.Address
             st.server = p.Remote.Address
+            linfo(st.LocalUser, "Connected to server:", cs.Server)
 
             if (!dtlsConnected && iceConnected) {
                 dtlsConnected = true;
                 cs.DTLSSetup = (float64(time.Since(dtlsStart)))/1000000.0
                 firstRTP = time.Now()
-
             }
         }
     })
