@@ -272,6 +272,7 @@ func stats_read(cfg *AppCfg, st *RunningState) {
     pc := st.pc
     g := st.g
     var connected bool
+    var skip bool
     for {
         select {
         case <- st.conn_exit:
@@ -360,6 +361,8 @@ func stats_read(cfg *AppCfg, st *RunningState) {
                         } else {
                             bitrate = 0.0
                         }
+                    } else {
+                        skip = true
                     }
                     o += fmt.Sprintf(", \"PacketLossPercentage\":%.2f", packets_loss_percentage)
                     o += fmt.Sprintf(", \"Bitrate\":%.2f", bitrate)
@@ -406,8 +409,10 @@ func stats_read(cfg *AppCfg, st *RunningState) {
             rpt += fmt.Sprintf(", \"AudioStreams\":%v", audios_str)
             // rpt += fmt.Sprintf(", \"RemoteOutboundRTPStreamStats\":%v", remote)
             rpt += "}\n"
-
-            *cfg.stats_ch <- []byte(rpt)
+            if !skip {
+                *cfg.stats_ch <- []byte(rpt)
+            }
+            skip = false
         }
     }
 }
