@@ -76,6 +76,7 @@ type RunningState struct {
     pc         *webrtc.PeerConnection
     g          *stats.Getter
     offer      *webrtc.SessionDescription
+    server     string             // the media server addr
     connecting atomic.Bool
     conn_exit  chan struct{}
     conn_ch    chan bool         // this is to notify stats goroutine the state of connection
@@ -84,8 +85,9 @@ type RunningState struct {
 
 type ConnectStats struct {
     UserID string                `json:"userId"`
+    Server string                `json:"server"`
     TestName string              `json:"TestName"`
-    HttpPubSub float64        `json:"httpSubscribe"`
+    HttpPubSub float64           `json:"httpSubscribe"`
     ICESetup float64             `json:"iceSetup"`
     DTLSSetup float64            `json:"dtlsSetup"`
     FirstRTP float64             `json:"firstRTP"`
@@ -291,6 +293,7 @@ func stats_read(cfg *AppCfg, st *RunningState) {
             }
             ts := pc.GetTransceivers()
             rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
+            rpt += fmt.Sprintf(", \"server\":\"%v\"", st.server)
             rpt += fmt.Sprintf(", \"TestName\":\"%v\"", *cfg.test_name)
             rpt += fmt.Sprintf(", \"ICE_State\":\"%v\"", pc.ICEConnectionState().String())
             rpt += fmt.Sprintf(", \"Conn_State\":\"%v\"", pc.ConnectionState().String())
@@ -409,7 +412,7 @@ func stats_read(cfg *AppCfg, st *RunningState) {
     }
 }
 
-func prepare_pc_for_publishing(cfg *AppCfg, st *RunningState) {
+func prepare_pc_for_publishing(cfg *AppCfg, st *RunningState, cs *ConnectStats) {
     pc := st.pc
 
     var video_codec string
@@ -533,17 +536,26 @@ func prepare_pc_for_publishing(cfg *AppCfg, st *RunningState) {
     }()
 
     pc.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState){
-        ldebug(st.LocalUser, "streaming ice connection state changed to ", connectionState)
+        ldebug(st.LocalUser, "streaming ice connection state changed to", connectionState)
         if connectionState == webrtc.ICEConnectionStateConnected {
             iceConnectedCancel()
         }
     })
 
     pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState){
-        ldebug(st.LocalUser, "streaming peer connection state changed to ", s)
+        ldebug(st.LocalUser, "streaming peer connection state changed to", s)
         if s == webrtc.PeerConnectionStateFailed {
             pc.Close()
             lerror(st.LocalUser, "pc.Closed() called, peer connection switched to failed")
+        } else if s == webrtc.PeerConnectionStateConnected {
+            // We've connected, no way we still don't know the address of remote server
+            p, e := pc.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
+            if e != nil {
+                lerror(st.LocalUser, "Cannot extract remote server address!")
+                log.Fatal()
+            }
+            cs.Server = p.Remote.Address
+            st.server = p.Remote.Address
         }
     })
 }
@@ -606,10 +618,22 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
             lerror(st.LocalUser, "connection failed, pc.Closed() called")
             st.close_conn()
         }
-        if (!dtlsConnected && iceConnected && state == webrtc.PeerConnectionStateConnected) {
-            dtlsConnected = true;
-            cs.DTLSSetup = (float64(time.Since(dtlsStart)))/1000000.0
-            firstRTP = time.Now()
+        if state == webrtc.PeerConnectionStateConnected {
+            // We've connected, no way we still don't know the address of remote server
+            p, e := pc.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
+            if e != nil {
+                lerror(st.LocalUser, "Cannot extract remote server address!")
+                log.Fatal()
+            }
+            cs.Server = p.Remote.Address
+            st.server = p.Remote.Address
+
+            if (!dtlsConnected && iceConnected) {
+                dtlsConnected = true;
+                cs.DTLSSetup = (float64(time.Since(dtlsStart)))/1000000.0
+                firstRTP = time.Now()
+
+            }
         }
     })
 
@@ -1048,7 +1072,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
                 panic(err)
             }
         } else {
-            prepare_pc_for_publishing(cfg, state)
+            prepare_pc_for_publishing(cfg, state, &cs)
         }
 
         offer, err := state.pc.CreateOffer(nil)
@@ -1172,7 +1196,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         var cmd TransCommand
         if cfg.streaming {
-            prepare_pc_for_publishing(cfg, state)
+            prepare_pc_for_publishing(cfg, state, &cs)
         } else {
             _, err = state.pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
             if err != nil {
