@@ -541,7 +541,7 @@ func prepare_pc_for_publishing(cfg *AppCfg, st *RunningState, cs *ConnectStats) 
     }()
 
     pc.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState){
-        ldebug(st.LocalUser, "streaming ice connection state changed to", connectionState)
+        linfo(st.LocalUser, "ice connection state changed to ", connectionState)
         if connectionState == webrtc.ICEConnectionStateConnected {
             iceConnectedCancel()
         }
@@ -593,7 +593,7 @@ func receive_streaming(cfg *AppCfg, st *RunningState, cs *ConnectStats, answer_s
     dtlsConnected := false
     firstRTPReceived := false
     pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-        ldebug(st.LocalUser, "ice connection state changed to ", state)
+        linfo(st.LocalUser, "ice connection state changed to ", state)
         ice_state = state
         if ice_state == webrtc.ICEConnectionStateFailed {
             pc.Close()
@@ -717,9 +717,9 @@ func on_event(cfg *AppCfg, st *RunningState, cs *ConnectStats, buf []byte) bool 
                     m := data.(map[string]interface{})
                     answer_sdp = m["sdp"].(string)
                     if cfg.streaming {
-                        ldebug(st.LocalUser, "clusterId =", m["clusterId"], "streamId =", m["streamId"], "publisherId =", m["publisherId"])
+                        linfo(st.LocalUser, "clusterId =", m["clusterId"], "streamId =", m["streamId"], "publisherId =", m["publisherId"])
                     } else {
-                        ldebug(st.LocalUser, "clusterId =", m["clusterId"], "streamViewId =", m["streamViewId"], "subscriberId =", m["subscriberId"])
+                        linfo(st.LocalUser, "clusterId =", m["clusterId"], "streamViewId =", m["streamViewId"], "subscriberId =", m["subscriberId"])
                     }
                 }
                 if cfg.streaming {
@@ -890,11 +890,11 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
                     _delay, err := strconv.Atoi(retry_after[0])
                     if err == nil && _delay > 0 {
                         delay = time.Duration(_delay)
-                        ldebug(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Body:'", string(body), "'. Attempt: ", attempt)
+                        linfo(state.LocalUser, "Server is on rate limit, will try reconnecting after", delay * time.Second, "as per server's request. Body:'", string(body), "'. Attempt: ", attempt)
                         continue
                     } 
                 }
-                ldebug(state.LocalUser, "Server returns 429 status code wihout 'Retry-After' field or with an invalid 'Retry-After' field in the HTTP header. Body:", string(body))
+                linfo(state.LocalUser, "Server returns 429 status code wihout 'Retry-After' field or with an invalid 'Retry-After' field in the HTTP header. Body:", string(body))
             }
 
             if delay == 0 {
@@ -905,7 +905,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
             if delay > 64 {
                 delay = 64
             }
-            ldebug(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Body:'", string(body), "'. Attemp: ", attempt)
+            linfo(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Body:'", string(body), "'. Attemp: ", attempt)
         } 
     }
     return true, now, parsed_resp

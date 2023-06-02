@@ -267,7 +267,7 @@ func load_h264_video(f *string, time_len time.Duration) *VideoData {
         }
         data.Frames = append(data.Frames, nal.Data)
     }
-    if len(data.Frames) > 1 || time_len > 0 {
+    if len(data.Frames) > 1 && time_len > 0 {
         data.Interval = (time.Duration)(time_len / time.Duration(len(data.Frames) - 1))
     } else {
         data.Interval = 30
@@ -276,7 +276,7 @@ func load_h264_video(f *string, time_len time.Duration) *VideoData {
     return &data
 }
 
-func load_ivf_video(f *string) *VideoData {
+func load_ivf_video(f *string, time_len time.Duration) *VideoData {
     file, err := os.Open(*f)
     if err != nil {
         panic(err)
@@ -286,7 +286,6 @@ func load_ivf_video(f *string) *VideoData {
         panic(err)
     }
     var data VideoData
-    data.Interval = time.Millisecond * time.Duration((float32(hdr.TimebaseNumerator)/float32(hdr.TimebaseDenominator))*1000)
     for {
         frame, _, err := ivf.ParseNextFrame()
         if errors.Is(err, io.EOF) {
@@ -295,6 +294,11 @@ func load_ivf_video(f *string) *VideoData {
             panic(err)
         }
         data.Frames = append(data.Frames, frame)
+    }
+    if len(data.Frames) > 1 && time_len > 0 {
+        data.Interval = (time.Duration)(time_len / time.Duration(len(data.Frames) - 1))
+    } else {
+        data.Interval = time.Millisecond * time.Duration((float32(hdr.TimebaseNumerator)/float32(hdr.TimebaseDenominator))*1000)
     }
     log.Info("Load ivf file: ", *f, " ", len(data.Frames), " frames")
     return &data
@@ -472,7 +476,7 @@ func main() {
             cfg.streaming_video = load_h264_video(&streaming_video, (time.Duration)(int64(len(cfg.streaming_audio) - 1) * int64(OggPageDuration)))
         } else {
             // we can do similar thing for ivf, but it seems the ivf header has provided accurate interval info
-            cfg.streaming_video = load_ivf_video(&streaming_video)
+            cfg.streaming_video = load_ivf_video(&streaming_video, (time.Duration)(int64(len(cfg.streaming_audio) - 1) * int64(OggPageDuration)))
         }
     }
 
