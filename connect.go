@@ -289,6 +289,7 @@ func stats_read(cfg *AppCfg, st *RunningState) {
             }
             connected = conn_state
         case <-time.After(time.Second * time.Duration(stats_report_interval)):
+            skip = false
             if !connected {
                 continue
             }
@@ -412,7 +413,6 @@ func stats_read(cfg *AppCfg, st *RunningState) {
             if !skip {
                 *cfg.stats_ch <- []byte(rpt)
             }
-            skip = false
         }
     }
 }
