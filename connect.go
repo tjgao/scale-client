@@ -825,6 +825,9 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
     var now time.Time
     var attempt int = 0
     for {
+        if delay > 0 {
+            time.Sleep(delay * time.Second)
+        }
         client := &http.Client{}
         req, err := http.NewRequest("POST", url, bytes.NewBuffer(bs))
         if err != nil {
@@ -835,9 +838,6 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
         req.Header.Set("Content-Type", "application/json")
         if cfg.streaming {
             req.Header.Add("Authorization", "Bearer " + *cfg.ptoken)
-        }
-        if delay > 0 {
-            time.Sleep(delay * time.Second)
         }
         now = time.Now()
         resp, err := client.Do(req)
@@ -894,7 +894,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
                         continue
                     } 
                 }
-                linfo(state.LocalUser, "Server returns 429 status code wihout 'Retry-After' field or with an invalid 'Retry-After' field in the HTTP header. Body:", string(body))
+                linfo(state.LocalUser, "Server returns 429 status code without 'Retry-After' field or with an invalid 'Retry-After' field in the HTTP header. Body:", string(body))
             }
 
             if delay == 0 {
