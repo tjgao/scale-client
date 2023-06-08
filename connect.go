@@ -68,19 +68,18 @@ type TransCommandResp struct {
 }
 
 type RunningState struct {
-    cid        int                   // an integer to identifiy a connection
-    Cert       webrtc.Certificate    // local cert
-    LocalUser  string                // ice user
-    LocalPwd   string                // ice pwd
-    Resp       *PubSubResp           // publish/subscribe response
+    cid        int                // an integer to identifiy a connection
+    Cert       webrtc.Certificate // local cert
+    LocalUser  string             // ice user
+    LocalPwd   string             // ice pwd
+    Resp       *PubSubResp        // publish/subscribe response
     pc         *webrtc.PeerConnection
     g          *stats.Getter
     offer      *webrtc.SessionDescription
-    server     string                // the media server addr
-    icePairID  string
+    server     string             // the media server addr
     connecting atomic.Bool
     conn_exit  chan struct{}
-    conn_ch    chan bool             // this is to notify stats goroutine the state of connection
+    conn_ch    chan bool         // this is to notify stats goroutine the state of connection
     close_conn func()
 }
 
@@ -294,33 +293,12 @@ func stats_read(cfg *AppCfg, st *RunningState) {
             if !connected {
                 continue
             }
-
-            pcStats := pc.GetStats()
-            pairStats, found := pcStats[st.icePairID]
-            if !found {
-                for k := range pcStats {
-                    sp := strings.Split(k, "-")
-                    if len(sp) > 1 && strings.HasPrefix(sp[0], "candidate:") && strings.HasPrefix(sp[1], "candidate:") {
-                        st.icePairID = k
-                        pairStats = pcStats[k]
-                        break
-                    }
-                }
-
-            } 
-
-            candidatePairStats, ok := pairStats.(webrtc.ICECandidatePairStats)
-            if !ok {
-                log.Fatal("Wrong type of stats!")
-            }
             ts := pc.GetTransceivers()
             rpt := fmt.Sprintf("{\"userId\":\"%v\"", st.LocalUser)
             rpt += fmt.Sprintf(", \"server\":\"%v\"", st.server)
             rpt += fmt.Sprintf(", \"TestName\":\"%v\"", *cfg.test_name)
             rpt += fmt.Sprintf(", \"ICE_State\":\"%v\"", pc.ICEConnectionState().String())
             rpt += fmt.Sprintf(", \"Conn_State\":\"%v\"", pc.ConnectionState().String())
-            rpt += fmt.Sprintf(", \"RetransmissionsReceived\":\"%v\"", candidatePairStats.RetransmissionsReceived)
-            rpt += fmt.Sprintf(", \"RetransmissionsSent\":\"%v\"", candidatePairStats.RetransmissionsSent)
             videos := []string{}
             audios := []string{}
             // remote := ""
