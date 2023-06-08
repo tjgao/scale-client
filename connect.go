@@ -810,7 +810,7 @@ func create_state(cid int, cfg *AppCfg) *RunningState {
 }
 
 
-func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url string) (bool, time.Time, *PubSubResp) {
+func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url string) (bool, time.Time, *PubSubResp, *string) {
     var bs []byte
     if cfg.streaming {
         var reqJson = PubReqJson{StreamName:cfg.streamName, StreamType:"WebRtc"}
@@ -834,6 +834,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
     var delay time.Duration = 0 
     var now time.Time
     var attempt int = 0
+    var x_req_id string
     for {
         if delay > 0 {
             time.Sleep(delay * time.Second)
@@ -878,15 +879,19 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
             } else {
                 state.Resp = parsed_resp
             }
+
+            if _id, ok := resp.Header["X-Request-id"]; ok {
+                x_req_id = _id[0]
+            }
             break
         }
 
         if resp.StatusCode < 400 || resp.StatusCode > 499 {
             lerror(state.LocalUser, "Server return status code", resp.StatusCode, ", connect goroutine exits")
-            return false, now, nil
+            return false, now, nil, &x_req_id
         } else if resp.StatusCode == 401 {
             lerror(state.LocalUser, "Received Unauthorized 401 status code from server, connect goroutine exits")
-            return false, now, nil
+            return false, now, nil, &x_req_id
         } else {
             attempt += 1
             body, err := ioutil.ReadAll(resp.Body)
@@ -918,7 +923,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
             linfo(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Body:'", string(body), "'. Attemp: ", attempt)
         } 
     }
-    return true, now, parsed_resp
+    return true, now, parsed_resp, &x_req_id
 }
 
 func generate_jwt_token(payload string, appKey string) string {
@@ -931,11 +936,12 @@ func generate_jwt_token(payload string, appKey string) string {
 }
 
 
-func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *string) (*string, time.Time) {
+func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *string) (*string, time.Time, *string) {
     var now time.Time
     var answer string
     var delay time.Duration
     var attempt int
+    var x_req_id string
 
     action := "sub"
     if cfg.streaming {
@@ -943,6 +949,10 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
     }
 
     for {
+        if delay > 0 {
+            time.Sleep(delay * time.Second)
+        }
+
         var token string
         if cfg.streaming  {
             token = generate_jwt_token(generate_rtcbackup_payload(cfg.appId, action, cfg.streamName + *postfix), cfg.appKey)
@@ -952,7 +962,7 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
         if err != nil {
             lerror(state.LocalUser, "Failed to create HTTP post object: ", err);
             log.Fatal()
-            return nil, now
+            return nil, now, &x_req_id
         }
         if cfg.streaming {
             req.Header.Add("Authorization", "Bearer " + token)
@@ -961,15 +971,12 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
 
         client := &http.Client{}
 
-        if delay > 0 {
-            time.Sleep(delay * time.Second)
-        }
         now = time.Now()
         resp, err := client.Do(req)
         if err != nil {
             lerror(state.LocalUser, fmt.Sprintf("Failed to post offer sdp to %v, err: %v", url, err))
             log.Fatal()
-            return nil, now
+            return nil, now, &x_req_id
         }
 
         if resp.StatusCode == 200 || resp.StatusCode == 201 {
@@ -979,15 +986,18 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
                 log.Fatal()
             }
             answer = string(body)
+            if _id, ok := resp.Header["X-Request-id"]; ok {
+                x_req_id = _id[0]
+            }
             break
         }
 
         if resp.StatusCode < 400 || resp.StatusCode > 499 {
             lerror(state.LocalUser, "Server return status code", resp.StatusCode, ", connect goroutine exits")
-            return nil, now
+            return nil, now, &x_req_id
         } else if resp.StatusCode == 401 {
             lerror(state.LocalUser, "Received Unauthorized 401 status code from server, connect goroutine exits")
-            return nil, now
+            return nil, now, &x_req_id
         } else {
             attempt += 1
             body, err := ioutil.ReadAll(resp.Body)
@@ -1019,7 +1029,7 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
             ldebug(state.LocalUser, "Server's status code:", resp.StatusCode, ". Wait", delay * time.Second, "and retry. Body:'", string(body), "'. Attemp: ", attempt)
         }
     }
-    return &answer, now
+    return &answer, now, &x_req_id
 }
 
 func send_streaming(cfg *AppCfg, st *RunningState, answer_sdp *string) {
@@ -1096,7 +1106,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
             panic(err)
         }
         state.offer = &offer
-        answer, now := rtcbackup_request(state, rtc_url, cfg, &postfix)
+        answer, now, x_req_id := rtcbackup_request(state, rtc_url, cfg, &postfix)
         if answer == nil {
             if !keep_trying(&state.LocalUser, &retry, fmt.Sprintf("Failed to POST offer sdp")) {
                 return
@@ -1104,8 +1114,11 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
                 continue
             }
         }
-        cs.HttpPubSub = (float64(time.Since(now)))/1000000.0
-
+        httpSpentTime := time.Since(now)
+        if httpSpentTime > time.Second {
+            linfo(state.LocalUser, "See long http subscribe time (>1s) with X-Request-id:", *x_req_id)
+        }
+        cs.HttpPubSub = (float64(httpSpentTime))/1000000.0
 
         state.conn_ch = make(chan bool)
         state.conn_exit = make(chan struct{})
@@ -1174,7 +1187,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         var cs ConnectStats
         cs.UserID = state.LocalUser
         cs.TestName = *cfg.test_name
-        ok, now, resp := pubsub_request(cid, state, cfg, &retry, target_url)
+        ok, now, resp, x_req_id := pubsub_request(cid, state, cfg, &retry, target_url)
         if !ok {
             break
         } 
@@ -1186,7 +1199,12 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }
 
         // we've successfully got wss address, we know http publish/subscribe time
-        cs.HttpPubSub = (float64(time.Since(now)))/1000000.0
+
+        httpSpentTime := time.Since(now)
+        if httpSpentTime > time.Second {
+            linfo(state.LocalUser, "See long http subscribe time (>1s) with X-Request-id:", *x_req_id)
+        }
+        cs.HttpPubSub = (float64(httpSpentTime))/1000000.0
 
         // we now visit wss url
         conn, _, err := websocket.DefaultDialer.Dial(wss_url.String(), nil)
