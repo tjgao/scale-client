@@ -179,12 +179,15 @@ func create_peerconnection(cfg *AppCfg, st *RunningState) (*webrtc.PeerConnectio
     var err error
     m := &webrtc.MediaEngine{}
 
-    videoRTCPFeedback := []webrtc.RTCPFeedback{
+    rtcpFeedback := []webrtc.RTCPFeedback{
         {Type: "goog-remb", Parameter: ""},
         {Type: "ccm", Parameter: "fir"},
-        {Type: "nack", Parameter: ""},
-        {Type: "nack", Parameter: "pli"},
         {Type: "transport-cc", Parameter: ""},
+    }
+
+    if !cfg.nack_off {
+        rtcpFeedback = append(rtcpFeedback, webrtc.RTCPFeedback{Type: "nack", Parameter: ""})
+        rtcpFeedback = append(rtcpFeedback, webrtc.RTCPFeedback{Type: "nack", Parameter: "pli"})
     }
 
     fmtp_line := ""
@@ -216,8 +219,7 @@ func create_peerconnection(cfg *AppCfg, st *RunningState) (*webrtc.PeerConnectio
         webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
             MimeType: mime_type, ClockRate: uint32(clock_rate), Channels: 0,
             SDPFmtpLine:  fmtp_line,
-            RTCPFeedback: videoRTCPFeedback,
-        },
+            RTCPFeedback: rtcpFeedback},
             PayloadType: webrtc.PayloadType(payload_type)}, webrtc.RTPCodecTypeVideo)
     if err != nil {
         panic(err)
@@ -225,7 +227,8 @@ func create_peerconnection(cfg *AppCfg, st *RunningState) (*webrtc.PeerConnectio
 
     err = m.RegisterCodec(
         webrtc.RTPCodecParameters{
-            RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 0},
+            RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000,
+            Channels: 0, RTCPFeedback:rtcpFeedback},
             PayloadType:        115}, webrtc.RTPCodecTypeAudio)
     if err != nil {
         panic(err)
@@ -242,10 +245,6 @@ func create_peerconnection(cfg *AppCfg, st *RunningState) (*webrtc.PeerConnectio
 
     ic := &interceptor.Registry{}
     ic.Add(statsIntFactory)
-    if err := webrtc.RegisterDefaultInterceptors(m, ic); err != nil {
-        panic(err)
-    }
-
     s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
     if cfg.pion_dbg {

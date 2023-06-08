@@ -66,6 +66,8 @@ type AppCfg struct {
     stats_ch *chan []byte
     // flag for turn on pion dbg
     pion_dbg bool
+    // flag for turn off nack
+    nack_off bool
     // test name
     test_name *string
     // remote codec
@@ -389,6 +391,7 @@ func main() {
         streaming_video string
         streaming_audio string
         one_on_one bool
+        nack_off bool
     )
 
     // setup common flags
@@ -413,6 +416,7 @@ func main() {
 
         fs.StringVar(&streamName, "stream_name", "", "Specify the stream name")
         fs.StringVar(&platform, "platform", "dev", "It can be 'dev', 'staging' or 'production'")
+        fs.BoolVar(&nack_off, "nack_off", false, "Disable RTCP NACK to turn off retransmission")
     }
 
     ws.StringVar(&viewer_url, "url", "", "Viewer URL to access [ws]")
@@ -484,6 +488,7 @@ func main() {
     cfg.codec = &codec
     cfg.pion_dbg = pion_dbg
     cfg.test_name = &test_name
+    cfg.nack_off = nack_off
 
 
     if level, ok := logLevelTable[logLevel]; ok {
