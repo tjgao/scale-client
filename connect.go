@@ -245,6 +245,17 @@ func create_peerconnection(cfg *AppCfg, st *RunningState) (*webrtc.PeerConnectio
 
     ic := &interceptor.Registry{}
     ic.Add(statsIntFactory)
+    if err := webrtc.ConfigureRTCPReports(ic); err != nil {
+        panic(err)
+    }
+    if err := webrtc.ConfigureTWCCSender(m, ic); err != nil {
+        panic(err)
+    }
+    if !cfg.nack_off {
+        if err := webrtc.ConfigureNack(m, ic); err != nil {
+            panic(err)
+        }
+    }
     s := webrtc.SettingEngine{}
     s.SetICECredentials(st.LocalUser, st.LocalPwd)
     if cfg.pion_dbg {
