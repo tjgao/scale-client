@@ -1,46 +1,46 @@
 package main
 
 import (
-	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	b64 "encoding/base64"
-	"encoding/binary"
-	"encoding/json"
-	"errors"
-	"flag"
-	"fmt"
-	"io"
-	"math/rand"
-	"net/http"
-	"net/url"
-	"os"
-	"regexp"
-	"strings"
-	"sync"
-	"time"
+    "bytes"
+    "crypto/hmac"
+    "crypto/sha256"
+    b64 "encoding/base64"
+    "encoding/binary"
+    "encoding/json"
+    "errors"
+    "flag"
+    "fmt"
+    "io"
+    "math/rand"
+    "net/http"
+    "net/url"
+    "os"
+    "path/filepath"
+    "regexp"
+    "strings"
+    "sync"
+    "time"
 
-	"github.com/pion/webrtc/v3/pkg/media/h264reader"
-	"github.com/pion/webrtc/v3/pkg/media/ivfreader"
-	"github.com/pion/webrtc/v3/pkg/media/oggreader"
+    "github.com/pion/webrtc/v3/pkg/media/h264reader"
+    "github.com/pion/webrtc/v3/pkg/media/ivfreader"
+    "github.com/pion/webrtc/v3/pkg/media/oggreader"
     log "github.com/sirupsen/logrus"
 )
 
 var Commit string
 
 type rtcbackup_payload struct {
-    Version string     `json:"version"`
-    AppId string       `json:"appId"`
-    StreamId string    `json:"streamId"`
-    Action string      `json:"action"`
-    EnableSubAuth bool `json:"enableSubAuth"`
-    Exp float64        `json:"exp"`
+    Version       string  `json:"version"`
+    AppId         string  `json:"appId"`
+    StreamId      string  `json:"streamId"`
+    Action        string  `json:"action"`
+    EnableSubAuth bool    `json:"enableSubAuth"`
+    Exp           float64 `json:"exp"`
 }
-
 
 type VideoData struct {
     Interval time.Duration
-    Frames [][]byte
+    Frames   [][]byte
 }
 
 // Currently we have assumption for the ogg file
@@ -153,7 +153,7 @@ func notify_send_stats(st chan []byte, dst string) {
 }
 
 func get_domain_suffix(viewer_url *string) string {
-    domain_splits :=  strings.Split(strings.Split(*viewer_url, ".")[0], "-")
+    domain_splits := strings.Split(strings.Split(*viewer_url, ".")[0], "-")
     domain := ""
     if len(domain_splits) > 1 {
         for _, s := range domain_splits[1:] {
@@ -163,7 +163,6 @@ func get_domain_suffix(viewer_url *string) string {
     }
     return domain
 }
-
 
 // parse the url to get stream account id and name
 func parse(url *string) map[string]string {
@@ -194,7 +193,6 @@ func uint64_bytes(n uint64) string {
     return strings.TrimRight(b64.StdEncoding.EncodeToString(buf.Bytes()), "=")
 }
 
-
 func genRandomString(length uint, chars string) string {
     var lens = len(chars)
     res := ""
@@ -204,11 +202,9 @@ func genRandomString(length uint, chars string) string {
     return res
 }
 
-
 func genRandomHash(length uint) string {
     return genRandomString(length, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 }
-
 
 func generate_appid(streamId string, ptoken_id uint64, stoken_id uint64) string {
     return streamId + "." + uint64_bytes(ptoken_id) + "." + uint64_bytes(stoken_id)
@@ -243,7 +239,7 @@ func generate_rtcbackup_payload(appId string, action string, streamName string) 
     p := rtcbackup_payload{Version: "1.0", AppId: appId, StreamId: streamName, Action: action, EnableSubAuth: false, Exp: exp}
     bs, err := json.Marshal(&p)
     if err != nil {
-        log.Fatal("Failed to create json: ", err);
+        log.Fatal("Failed to create json: ", err)
     }
     return string(bs)
 }
@@ -272,7 +268,7 @@ func load_h264_video(f *string, time_len time.Duration) *VideoData {
         data.Frames = append(data.Frames, nal.Data)
     }
     if len(data.Frames) > 1 && time_len > 0 {
-        data.Interval = (time.Duration)(time_len / time.Duration(len(data.Frames) - 1))
+        data.Interval = (time.Duration)(time_len / time.Duration(len(data.Frames)-1))
     } else {
         data.Interval = 30
     }
@@ -300,14 +296,13 @@ func load_ivf_video(f *string, time_len time.Duration) *VideoData {
         data.Frames = append(data.Frames, frame)
     }
     if len(data.Frames) > 1 && time_len > 0 {
-        data.Interval = (time.Duration)(time_len / time.Duration(len(data.Frames) - 1))
+        data.Interval = (time.Duration)(time_len / time.Duration(len(data.Frames)-1))
     } else {
         data.Interval = time.Millisecond * time.Duration((float32(hdr.TimebaseNumerator)/float32(hdr.TimebaseDenominator))*1000)
     }
     log.Info("Load ivf file: ", *f, " ", len(data.Frames), " frames")
     return &data
 }
-
 
 func load_ogg_audio(f *string) []OggFrame {
     file, err := os.Open(*f)
@@ -326,34 +321,33 @@ func load_ogg_audio(f *string) []OggFrame {
         } else if oggErr != nil {
             panic(oggErr)
         }
-        oggFrames = append(oggFrames, OggFrame{frame:pageData, granu:hdr.GranulePosition})
+        oggFrames = append(oggFrames, OggFrame{frame: pageData, granu: hdr.GranulePosition})
     }
     log.Info("Load ogg file: ", *f, " ", len(oggFrames), " frames")
     return oggFrames
 }
 
-func create_app_id(cfg* AppCfg) {
-    if cfg.ptoken_id == 0 || cfg.stoken_id == 0 || cfg.streamAccountId == ""{
+func create_app_id(cfg *AppCfg) {
+    if cfg.ptoken_id == 0 || cfg.stoken_id == 0 || cfg.streamAccountId == "" {
         log.Fatal("Must specify pub/sub token id and stream account id")
     }
     cfg.appId = generate_appid(cfg.streamAccountId, cfg.ptoken_id, cfg.stoken_id)
 }
 
-
-func create_app_key(cfg* AppCfg) {
+func create_app_key(cfg *AppCfg) {
     if *cfg.ptoken == "" || *cfg.stoken == "" {
         log.Fatal("Must specify pub/sub token")
-    } 
+    }
     cfg.appKey = generate_appkey(cfg.ptoken, cfg.stoken)
 }
-
 
 var printed_view_url bool
 
 func main() {
     if len(os.Args) < 2 {
-        fmt.Println("Build:", Commit)
-        fmt.Println("Available subcommands: ws, rb. Please check the help: <program> <subcommand> -h")
+        fmt.Println()
+        fmt.Print("Build: ", Commit, "\n\n")
+        fmt.Println("Available subcommands: ws, rb. Please check the help:", filepath.Base(os.Args[0]), "<subcommand> -h")
         os.Exit(0)
     }
 
@@ -366,42 +360,43 @@ func main() {
     }
 
     var (
-        test_name string
-        codec string
-        num int
-        logLevel string
-        logfile string
-        pion_dbg bool
+        test_name       string
+        codec           string
+        num             int
+        logLevel        string
+        logfile         string
+        pion_dbg        bool
         connecting_time uint64
-        max_connecting uint64
+        max_connecting  uint64
         report_interval int64
-        retry_times int64
-        stats_dst string
-        ws = flag.NewFlagSet("ws", flag.ExitOnError)
-        rtcbackup = flag.NewFlagSet("rb", flag.ExitOnError)
+        retry_times     int64
+        stats_dst       string
+        ws              = flag.NewFlagSet("ws", flag.ExitOnError)
+        rtcbackup       = flag.NewFlagSet("rb", flag.ExitOnError)
 
-        viewer_url string
+        viewer_url       string
         wait_on_inactive bool
 
-        ptkid uint64
-        stkid uint64
-        ptoken string
-        stoken string
-        accountId string
-        streamName string
-        platform string
-        streaming bool
+        ptkid           uint64
+        stkid           uint64
+        ptoken          string
+        stoken          string
+        accountId       string
+        streamName      string
+        platform        string
+        streaming       bool
         streaming_video string
         streaming_audio string
-        one_on_one bool
-        nack_off bool
+        one_on_one      bool
+        nack_off        bool
     )
 
     // setup common flags
     for _, fs := range []*flag.FlagSet{ws, rtcbackup} {
         fs.Usage = func() {
-            fmt.Println("Build:", Commit)
-            fmt.Printf("Usage of %s:\n\n", os.Args[0])
+            fmt.Println()
+            fmt.Print("Build: ", Commit, "\n\n")
+            fmt.Printf("Usage of %s %s:\n\n", filepath.Base(os.Args[0]), os.Args[1])
             fs.PrintDefaults()
         }
         fs.StringVar(&test_name, "name", "", "Name of the test")
@@ -415,7 +410,6 @@ func main() {
         fs.Int64Var(&report_interval, "report_interval", 10, "The stats report interval.")
         fs.StringVar(&stats_dst, "report_dest", "", "Specify where the stats data should be sent. It can be local file or remote POST address(starts with http:// or https://)")
         fs.Int64Var(&retry_times, "retry_times", 0, `If a connection received stopped events or fails for any reason, it will retry a specified number of times, default value is 0. If a negative value is provided, it retries forever.`)
-
 
         fs.BoolVar(&streaming, "streaming", false, "The client will act as a streaming client instead of a viewer if this is on, video/audio files are required.")
         fs.StringVar(&streaming_video, "streaming_video", "", "Streaming video file")
@@ -485,19 +479,17 @@ func main() {
         if codec == "h264" {
             // we use the time_len to estimate interval for video stream
             // note: we have the assumption that the ogg audio page duration is 20ms
-            cfg.streaming_video = load_h264_video(&streaming_video, (time.Duration)(int64(len(cfg.streaming_audio) - 1) * int64(OggPageDuration)))
+            cfg.streaming_video = load_h264_video(&streaming_video, (time.Duration)(int64(len(cfg.streaming_audio)-1)*int64(OggPageDuration)))
         } else {
             // we can do similar thing for ivf, but it seems the ivf header has provided accurate interval info
-            cfg.streaming_video = load_ivf_video(&streaming_video, (time.Duration)(int64(len(cfg.streaming_audio) - 1) * int64(OggPageDuration)))
+            cfg.streaming_video = load_ivf_video(&streaming_video, (time.Duration)(int64(len(cfg.streaming_audio)-1)*int64(OggPageDuration)))
         }
     }
-
 
     cfg.codec = &codec
     cfg.pion_dbg = pion_dbg
     cfg.test_name = &test_name
     cfg.nack_off = nack_off
-
 
     if level, ok := logLevelTable[logLevel]; ok {
         log.SetLevel(level)
@@ -523,7 +515,7 @@ func main() {
         // we should have enough information to figure out the view url, it is printed out for convenience
         check_url_tpl := "https://viewer%v.millicast.com/?streamId=%v/%v"
         special_rtcbackup_name := url.QueryEscape(generate_rtcbackup_name(cfg.ptoken_id, cfg.stoken_id, &cfg.streamName))
-        check_url := fmt.Sprintf(check_url_tpl, *cfg.platform, cfg.streamAccountId, special_rtcbackup_name);
+        check_url := fmt.Sprintf(check_url_tpl, *cfg.platform, cfg.streamAccountId, special_rtcbackup_name)
         fmt.Println("\n---------------------------------------------------------------")
         fmt.Println("View URL:")
         fmt.Println(check_url)
@@ -535,7 +527,7 @@ func main() {
     } else {
         if cfg.streaming {
             // For ws, assume account id is xxYxx, stream name is s
-            // The rule is simple: https://viewer<platform>.millicast.com?streamId=xxYxx/s 
+            // The rule is simple: https://viewer<platform>.millicast.com?streamId=xxYxx/s
             // But ws stream publishing does not need stream account id, client can find it by talking to servers
             // so we cannot print out the view url now, we'll print it out later
             if *cfg.ptoken == "" {
@@ -617,7 +609,7 @@ func main() {
     before_connect := time.Now()
     for i := 0; i < num; i++ {
         connect(wg, i, &cfg, retry_times)
-        if conn_interval > 0 && i != num - 1 {
+        if conn_interval > 0 && i != num-1 {
             time.Sleep(time.Duration(conn_interval * 1e9))
         }
     }
