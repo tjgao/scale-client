@@ -880,7 +880,7 @@ func pubsub_request(cid int, state *RunningState, cfg *AppCfg, retry *int64, url
                 state.Resp = parsed_resp
             }
 
-            if _id, ok := resp.Header["X-Request-id"]; ok {
+            if _id, ok := resp.Header["X-Request-Id"]; ok {
                 x_req_id = _id[0]
             }
             break
@@ -986,7 +986,7 @@ func rtcbackup_request(state *RunningState, url string, cfg *AppCfg, postfix *st
                 log.Fatal()
             }
             answer = string(body)
-            if _id, ok := resp.Header["X-Request-id"]; ok {
+            if _id, ok := resp.Header["X-Request-Id"]; ok {
                 x_req_id = _id[0]
             }
             break
@@ -1116,7 +1116,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }
         httpSpentTime := time.Since(now)
         if httpSpentTime > time.Second {
-            linfo(state.LocalUser, "See long http subscribe time (>1s) with X-Request-id:", *x_req_id)
+            linfo(state.LocalUser, "See long http subscribe time (>1s) with X-Request-Id:", *x_req_id)
         }
         cs.HttpPubSub = (float64(httpSpentTime))/1000000.0
 
@@ -1202,7 +1202,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         httpSpentTime := time.Since(now)
         if httpSpentTime > time.Second {
-            linfo(state.LocalUser, "See long http subscribe time (>1s) with X-Request-id:", *x_req_id)
+            linfo(state.LocalUser, "See long http subscribe time (>1s) with X-Request-Id:", *x_req_id)
         }
         cs.HttpPubSub = (float64(httpSpentTime))/1000000.0
 
