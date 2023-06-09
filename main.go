@@ -26,6 +26,8 @@ import (
     log "github.com/sirupsen/logrus"
 )
 
+var Commit string
+
 type rtcbackup_payload struct {
     Version string     `json:"version"`
     AppId string       `json:"appId"`
@@ -350,7 +352,8 @@ var printed_view_url bool
 
 func main() {
     if len(os.Args) < 2 {
-        log.Info("Available subcommands: ws, rb. Please check the help: <program> <subcommand> -h")
+        fmt.Println("Build:", Commit)
+        fmt.Println("Available subcommands: ws, rb. Please check the help: <program> <subcommand> -h")
         os.Exit(0)
     }
 
@@ -396,6 +399,11 @@ func main() {
 
     // setup common flags
     for _, fs := range []*flag.FlagSet{ws, rtcbackup} {
+        fs.Usage = func() {
+            fmt.Println("Build:", Commit)
+            fmt.Printf("Usage of %s:\n\n", os.Args[0])
+            fs.PrintDefaults()
+        }
         fs.StringVar(&test_name, "name", "", "Name of the test")
         fs.StringVar(&codec, "codec", "h264", "Codec used by remote side. Valid options are h264, vp8 and vp9.")
         fs.IntVar(&num, "num", 1, "Number of connections")
