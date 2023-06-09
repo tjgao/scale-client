@@ -1116,7 +1116,7 @@ func connect_rtcbackup(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
         }
         httpSpentTime := time.Since(now)
         if httpSpentTime > time.Second {
-            linfo(state.LocalUser, "See long http subscribe time (>1s) with X-Request-Id:", *x_req_id)
+            linfo(state.LocalUser, "See long http subscribe time (", httpSpentTime, ") with X-Request-Id:", *x_req_id)
         }
         cs.HttpPubSub = (float64(httpSpentTime))/1000000.0
 
@@ -1202,7 +1202,7 @@ func connect_ws(wg *sync.WaitGroup, cid int, cfg *AppCfg, retry int64) {
 
         httpSpentTime := time.Since(now)
         if httpSpentTime > time.Second {
-            linfo(state.LocalUser, "See long http subscribe time (>1s) with X-Request-Id:", *x_req_id)
+            linfo(state.LocalUser, "See long http subscribe time (", httpSpentTime, ") with X-Request-Id:", *x_req_id)
         }
         cs.HttpPubSub = (float64(httpSpentTime))/1000000.0
 
